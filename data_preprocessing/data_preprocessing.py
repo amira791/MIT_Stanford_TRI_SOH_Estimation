@@ -31,7 +31,7 @@ from typing import Optional, Dict, List, Tuple
 warnings.filterwarnings("ignore")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config import (
+from configurations.config_preprocessing import (
     DATA_DIR, RESULTS_DIR,
     NOMINAL_CAPACITY, INIT_CYCLES_AVG, MIN_CYCLES_PER_CELL,
 )
