@@ -1,226 +1,170 @@
-# step3_train.py
+# model_architecture/cnn_mamba_uq.py
 """
-step3_train.py
-===============
-TRAIN / VAL / TEST SPLIT  +  MODEL TRAINING
----------------------------------------------
-1. Loads soh_dataset.pkl  (from step2)
-2. Applies CELL-OUT split  ->  no data leakage between train/val/test
-3. Builds sliding-window sequence datasets + DataLoaders
-4. Trains CNN-Mamba-UQ with:
-     - MSE loss
-     - AdamW optimiser + ReduceLROnPlateau scheduler
-     - Early stopping
-5. Saves best checkpoint + training history
-
-Usage
------
-  python step3_train.py
+CNN-Mamba-UQ Architecture
 """
 
 import sys
-import time
-import pickle
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, TensorDataset
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.preprocessing import StandardScaler
 from pathlib import Path
-import warnings
-warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config_preprocessing import (
-    RESULTS_DIR, FEATURE_COLS, TARGET_COL,
-    TRAIN_FRAC, VAL_FRAC, RANDOM_SEED,
-    SEQ_LEN, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY,
-    MAX_EPOCHS, PATIENCE, LR_PATIENCE
+from configurations.config_training import (
+    N_FEATURES, SEQ_LEN, CNN_CHANNELS, CNN_KERNEL,
+    MAMBA_D_MODEL, MAMBA_D_STATE, MAMBA_N_LAYERS,
+    MC_DROPOUT_P, MC_SAMPLES
 )
 
-from cnn_mamba_uq import CNNMambaUQ
+# DO NOT put this line - DELETE IT:
+# from cnn_mamba_uq import CNNMambaUQ
 
-MODEL_SAVE_DIR = RESULTS_DIR / "checkpoints"
-SCALER_PATH = RESULTS_DIR / "scaler.pkl"
-MODEL_SAVE_DIR.mkdir(exist_ok=True)
+class CNNEncoder(nn.Module):
+    """1-D temporal CNN encoder."""
+    def __init__(self, in_features: int, channels: list, kernel: int):
+        super().__init__()
+        layers = []
+        in_ch = in_features
+        for out_ch in channels:
+            layers += [
+                nn.Conv1d(in_ch, out_ch, kernel_size=kernel, padding=kernel // 2, bias=False),
+                nn.BatchNorm1d(out_ch),
+                nn.GELU(),
+            ]
+            in_ch = out_ch
+        self.net = nn.Sequential(*layers)
+        self.out_ch = channels[-1]
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        return x.permute(0, 2, 1)
 
-def cell_out_split(df: pd.DataFrame):
-    """
-    Split at the CELL level.
-    Each cell's ALL cycles go to exactly one of train / val / test.
-    This is the only correct split for a per-cell deployment scenario.
-    """
-    rng = np.random.default_rng(RANDOM_SEED)
-    cells = df["cell_id"].unique()
-    n = len(cells)
-    idx = rng.permutation(n)
+class MambaLikeBlock(nn.Module):
+    """Hardware-portable selective SSM block."""
+    def __init__(self, d_model: int, d_state: int, dropout: float = 0.0):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
 
-    n_train = int(n * TRAIN_FRAC)
-    n_val = int(n * VAL_FRAC)
+        self.in_proj = nn.Linear(d_model, d_model * 2)
+        self.B_proj = nn.Linear(d_model, d_state, bias=False)
+        self.A_log = nn.Parameter(torch.log(torch.rand(d_state) * 0.5 + 0.4))
+        self.out_proj = nn.Linear(d_state, d_model)
 
-    train_cells = cells[idx[:n_train]]
-    val_cells = cells[idx[n_train:n_train + n_val]]
-    test_cells = cells[idx[n_train + n_val:]]
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * 2, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.drop = nn.Dropout(dropout)
 
-    print(f"\n  Cell-out split:")
-    print(f"    Train : {len(train_cells)} cells")
-    print(f"    Val   : {len(val_cells)} cells")
-    print(f"    Test  : {len(test_cells)} cells")
+    def ssm_scan(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        A = torch.sigmoid(self.A_log)
+        h = x.new_zeros(B, self.d_state)
+        outputs = []
+        for t in range(T):
+            x_t = x[:, t, :]
+            B_t = torch.sigmoid(self.B_proj(x_t))
+            h = A * h + B_t * x_t.mean(-1, keepdim=True)
+            outputs.append(h)
+        return torch.stack(outputs, dim=1)
 
-    df_train = df[df["cell_id"].isin(train_cells)].copy()
-    df_val = df[df["cell_id"].isin(val_cells)].copy()
-    df_test = df[df["cell_id"].isin(test_cells)].copy()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x_n = self.norm1(x)
+        gate, x_proj = self.in_proj(x_n).chunk(2, dim=-1)
+        gate = torch.sigmoid(gate)
+        h_seq = self.ssm_scan(x_proj)
+        y = self.out_proj(h_seq)
+        y = gate * y
+        x = residual + self.drop(y)
+        x = x + self.drop(self.mlp(self.norm2(x)))
+        return x
 
-    print(f"    Train samples : {len(df_train):,}")
-    print(f"    Val   samples : {len(df_val):,}")
-    print(f"    Test  samples : {len(df_test):,}")
+class MambaEncoder(nn.Module):
+    """Stack of MambaLikeBlock layers."""
+    def __init__(self, d_model: int, d_state: int, n_layers: int, dropout: float):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            MambaLikeBlock(d_model, d_state, dropout) for _ in range(n_layers)
+        ])
 
-    return df_train, df_val, df_test, test_cells
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
-def build_sequences(df: pd.DataFrame, scaler: StandardScaler, seq_len: int = SEQ_LEN) -> TensorDataset:
-    """
-    For each cell, build sliding windows of length seq_len.
-    Window stride = 1 cycle.
-    X shape : (N_windows, seq_len, n_features)
-    y shape : (N_windows,)
-    """
-    X_list, y_list = [], []
+class UQHead(nn.Module):
+    """Regression head with MC Dropout."""
+    def __init__(self, d_model: int, dropout: float):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+            nn.Sigmoid(),
+        )
 
-    for cell_id, grp in df.groupby("cell_id"):
-        grp = grp.sort_values("cycle_index").reset_index(drop=True)
-        X_cell = scaler.transform(grp[FEATURE_COLS].values).astype(np.float32)
-        y_cell = grp[TARGET_COL].values.astype(np.float32)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
-        n = len(grp)
-        if n <= seq_len:
-            continue
+class CNNMambaUQ(nn.Module):
+    """Full CNN-Mamba-UQ model."""
+    def __init__(
+        self,
+        n_features: int = N_FEATURES,
+        seq_len: int = SEQ_LEN,
+        cnn_channels: list = CNN_CHANNELS,
+        cnn_kernel: int = CNN_KERNEL,
+        d_model: int = MAMBA_D_MODEL,
+        d_state: int = MAMBA_D_STATE,
+        n_layers: int = MAMBA_N_LAYERS,
+        dropout: float = MC_DROPOUT_P,
+        mc_samples: int = MC_SAMPLES,
+    ):
+        super().__init__()
+        self.mc_samples = mc_samples
 
-        for i in range(n - seq_len):
-            X_list.append(X_cell[i:i + seq_len])
-            y_list.append(y_cell[i + seq_len])
+        self.cnn = CNNEncoder(n_features, cnn_channels, cnn_kernel)
+        cnn_out_dim = cnn_channels[-1]
+        self.proj = nn.Linear(cnn_out_dim, d_model)
+        self.mamba = MambaEncoder(d_model, d_state, n_layers, dropout)
+        self.head = UQHead(d_model, dropout)
 
-    X = torch.tensor(np.array(X_list), dtype=torch.float32)
-    y = torch.tensor(np.array(y_list), dtype=torch.float32)
-    return TensorDataset(X, y)
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"  CNN-Mamba-UQ  |  parameters: {n_params:,}")
 
-def train_epoch(model, loader, optimiser, criterion, device):
-    model.train()
-    total_loss = 0.0
-    for X_batch, y_batch in loader:
-        X_batch = X_batch.to(device)
-        y_batch = y_batch.to(device).unsqueeze(1)
-        optimiser.zero_grad()
-        pred = model(X_batch)
-        loss = criterion(pred, y_batch)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimiser.step()
-        total_loss += loss.item() * len(X_batch)
-    return total_loss / len(loader.dataset)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.cnn(x)
+        x = self.proj(x)
+        x = self.mamba(x)
+        x = x[:, -1, :]
+        return self.head(x)
 
-@torch.no_grad()
-def eval_epoch(model, loader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    for X_batch, y_batch in loader:
-        X_batch = X_batch.to(device)
-        y_batch = y_batch.to(device).unsqueeze(1)
-        pred = model(X_batch)
-        loss = criterion(pred, y_batch)
-        total_loss += loss.item() * len(X_batch)
-    return total_loss / len(loader.dataset)
+    @torch.no_grad()
+    def mc_predict(self, x: torch.Tensor) -> dict:
+        self.train()
+        preds = torch.cat([self.forward(x) for _ in range(self.mc_samples)], dim=-1)
+        self.eval()
 
-def train_model(model, train_dl, val_dl, device):
-    criterion = nn.MSELoss()
-    optimiser = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    scheduler = ReduceLROnPlateau(optimiser, mode="min", patience=LR_PATIENCE, factor=0.5, verbose=True)
+        mean = preds.mean(dim=-1)
+        std = preds.std(dim=-1)
+        ci_low = mean - 1.96 * std
+        ci_high = mean + 1.96 * std
 
-    best_val = float("inf")
-    patience_counter = 0
-    history = []
-    ckpt_path = MODEL_SAVE_DIR / "cnn_mamba_uq_best.pt"
-
-    print(f"\n{'='*60}")
-    print(f"  Training CNN-Mamba-UQ on {device}")
-    print(f"{'='*60}")
-    print(f"  {'Epoch':>6}  {'Train MSE':>10}  {'Val MSE':>10}  {'LR':>10}  {'Time':>7}")
-    print(f"  {'─'*55}")
-
-    for epoch in range(1, MAX_EPOCHS + 1):
-        t0 = time.time()
-        train_loss = train_epoch(model, train_dl, optimiser, criterion, device)
-        val_loss = eval_epoch(model, val_dl, criterion, device)
-        scheduler.step(val_loss)
-        elapsed = time.time() - t0
-
-        lr_now = optimiser.param_groups[0]["lr"]
-        history.append({"epoch": epoch, "train_mse": train_loss, "val_mse": val_loss, "lr": lr_now})
-
-        print(f"  {epoch:>6}  {train_loss:>10.6f}  {val_loss:>10.6f}  {lr_now:>10.2e}  {elapsed:>6.1f}s")
-
-        if val_loss < best_val:
-            best_val = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), ckpt_path)
-        else:
-            patience_counter += 1
-
-        if patience_counter >= PATIENCE:
-            print(f"\n  Early stopping at epoch {epoch} (no improvement for {PATIENCE} epochs)")
-            break
-
-    print(f"\n  Best val MSE : {best_val:.6f}")
-    print(f"  Checkpoint   : {ckpt_path}\n")
-
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    return model, pd.DataFrame(history)
-
-def main():
-    pkl_path = RESULTS_DIR / "soh_dataset.pkl"
-    print(f"Loading dataset from {pkl_path} ...")
-    df = pd.read_pickle(pkl_path)
-    print(f"  {len(df):,} rows  |  {df['cell_id'].nunique()} cells\n")
-
-    df_train, df_val, df_test, test_cells = cell_out_split(df)
-
-    scaler = StandardScaler()
-    scaler.fit(df_train[FEATURE_COLS].values)
-    with open(SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
-    print(f"\n  Scaler saved -> {SCALER_PATH}")
-
-    with open(RESULTS_DIR / "test_cells.pkl", "wb") as f:
-        pickle.dump(test_cells, f)
-
-    print("\nBuilding sliding-window sequences ...")
-    train_ds = build_sequences(df_train, scaler)
-    val_ds = build_sequences(df_val, scaler)
-    test_ds = build_sequences(df_test, scaler)
-
-    print(f"  Train sequences : {len(train_ds):,}")
-    print(f"  Val   sequences : {len(val_ds):,}")
-    print(f"  Test  sequences : {len(test_ds):,}")
-
-    torch.save(test_ds, RESULTS_DIR / "test_dataset.pt")
-
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
-
-    print("\nInitialising CNN-Mamba-UQ ...")
-    model = CNNMambaUQ().to(DEVICE)
-
-    model, history = train_model(model, train_dl, val_dl, DEVICE)
-
-    history.to_csv(RESULTS_DIR / "training_history.csv", index=False)
-    print(f"  Training history -> {RESULTS_DIR / 'training_history.csv'}")
-    print("\nStep 3 complete. Run step4_evaluate.py next.")
-
-if __name__ == "__main__":
-    main()
+        return {
+            "mean": mean.cpu().numpy(),
+            "std": std.cpu().numpy(),
+            "ci_low": ci_low.cpu().numpy(),
+            "ci_high": ci_high.cpu().numpy(),
+        }
