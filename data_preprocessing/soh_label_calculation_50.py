@@ -6,9 +6,9 @@ Key changes vs original version:
   REMOVED  discharge_capacity_prev  (raw Ah — cell-scale dependent)
   REMOVED  charge_capacity          (raw Ah — cell-scale dependent)
   REMOVED  cycle_index (raw)        (unbounded — different max per cell)
+  REMOVED  delta_soh                (creates mathematical tautology)
 
   ADDED    soh_prev                 = discharge_capacity(t-1) / initial_cap
-  ADDED    delta_soh                = soh(t) - soh(t-1)
   ADDED    coulombic_eff            = charge_capacity(t-1) / discharge_capacity(t-1)
   KEPT     dc_internal_resistance   (already cell-invariant)
   KEPT     temperature_max          (already cell-invariant)
@@ -31,7 +31,7 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config_training_ import (
+from configurations.config_training_50 import (
     RESULTS_DIR, SOH_EOL_THRESHOLD, FEATURE_COLS, TARGET_COL
 )
 
@@ -60,11 +60,6 @@ def build_cell_dataframe(cell: Dict) -> pd.DataFrame:
     soh_prev[0] = np.nan
     soh_prev[1:] = soh[:-1]
 
-    # delta_soh: SOH(t) - SOH(t-1)
-    delta_soh = np.empty(n, dtype=np.float32)
-    delta_soh[0] = np.nan
-    delta_soh[1:] = soh[1:] - soh[:-1]
-
     # coulombic_eff: charge_cap(t-1) / discharge_cap(t-1)
     disch_prev = np.empty(n, dtype=np.float32)
     disch_prev[0] = np.nan
@@ -78,12 +73,13 @@ def build_cell_dataframe(cell: Dict) -> pd.DataFrame:
         coul_eff = np.where(disch_prev > 0.01, charg_prev / disch_prev, np.nan).astype(np.float32)
     coul_eff = np.clip(coul_eff, 0.80, 1.20)
 
-    # cycle_norm: relative life position
+    # cycle_norm: relative life position (clip to [0,1])
     cycle_norm = (cycle_index / max(eol, 1)).astype(np.float32)
+    cycle_norm = np.clip(cycle_norm, 0.0, 1.0)
 
+    # Create DataFrame with ONLY the features in FEATURE_COLS
     df = pd.DataFrame({
         "soh_prev": soh_prev,
-        "delta_soh": delta_soh,
         "coulombic_eff": coul_eff,
         "dc_internal_resistance": cell["dc_internal_resistance"],
         "temperature_max": cell["temperature_max"],
@@ -96,8 +92,10 @@ def build_cell_dataframe(cell: Dict) -> pd.DataFrame:
         "eol_cycle": eol,
     })
 
+    # Drop first row (NaN in soh_prev)
     df = df.iloc[1:].reset_index(drop=True)
 
+    # Fill any remaining NaN values
     for col in FEATURE_COLS:
         if df[col].isnull().any():
             df[col] = df[col].ffill().bfill()
@@ -126,7 +124,7 @@ def print_dataset_report(df: pd.DataFrame) -> None:
         print(f"    {col:<25}  [{lo:.4f}, {hi:.4f}]")
 
     corr = df["soh_prev"].corr(df["soh"])
-    print(f"\n  Pearson r(soh_prev, soh) = {corr:.4f} (expected > 0.98)")
+    print(f"\n  Pearson r(soh_prev, soh) = {corr:.4f}")
     print(f"{'='*60}\n")
 
 def save_dataset(df: pd.DataFrame) -> None:

@@ -33,7 +33,7 @@ from configurations.config_training_ import (
     MAX_EPOCHS, PATIENCE, LR_PATIENCE
 )
 
-from cnn_mamba_uq import CNNMambaUQ
+from cnn_mamba_uq_imprv import CNNMambaUQ
 
 MODEL_SAVE_DIR = RESULTS_DIR / "checkpoints"
 SCALER_PATH = RESULTS_DIR / "scaler.pkl"
