@@ -1,4 +1,3 @@
-# model_evaluation/evaluate.py
 """
 MODEL EVALUATION
 -----------------
@@ -34,12 +33,14 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config_training import (
+# FIX 1: Use the correct config file (with underscore, matching training)
+from configurations.config_training_ import (
     RESULTS_DIR, MODEL_SAVE_DIR, SCALER_PATH,
     FEATURE_COLS, TARGET_COL, SEQ_LEN,
     BATCH_SIZE, MC_SAMPLES
 )
 
+# FIX 2: Import the SAME model architecture used for training
 from model_architecture.cnn_mamba_uq_imprv import CNNMambaUQ
 
 INFERENCE_DEVICE = "cpu"
@@ -74,19 +75,22 @@ def pinaw(ci_low: np.ndarray, ci_high: np.ndarray, y_range: float) -> float:
 def evaluate_performance(model: nn.Module, test_ds: TensorDataset, device: torch.device) -> pd.DataFrame:
     loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     model.to(device)
+    model.eval()  # Set to eval mode for evaluation
 
     all_mean, all_std = [], []
     all_ci_lo, all_ci_hi = [], []
     all_true = []
 
-    for X_batch, y_batch in loader:
-        X_batch = X_batch.to(device)
-        result = model.mc_predict(X_batch)
-        all_mean.append(result["mean"])
-        all_std.append(result["std"])
-        all_ci_lo.append(result["ci_low"])
-        all_ci_hi.append(result["ci_high"])
-        all_true.append(y_batch.numpy())
+    with torch.no_grad():  # Wrap entire evaluation in no_grad for efficiency
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            # mc_predict internally handles train/eval mode for MC dropout
+            result = model.mc_predict(X_batch)
+            all_mean.append(result["mean"])
+            all_std.append(result["std"])
+            all_ci_lo.append(result["ci_low"])
+            all_ci_hi.append(result["ci_high"])
+            all_true.append(y_batch.numpy())
 
     y_true = np.concatenate(all_true)
     y_pred = np.concatenate(all_mean)
@@ -259,24 +263,38 @@ def main():
     print("\nLoading CNN-Mamba-UQ checkpoint...")
     model = CNNMambaUQ()
     ckpt = RESULTS_DIR / "checkpoints" / "cnn_mamba_uq_best.pt"
-    model.load_state_dict(torch.load(ckpt, map_location=DEVICE))
+    
+    # Load the trained weights
+    state_dict = torch.load(ckpt, map_location=DEVICE)
+    model.load_state_dict(state_dict)
     model.to(DEVICE)
+    model.eval()  # Set to evaluation mode
     print(f"Loaded from {ckpt}")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     print("\nLoading test dataset...")
     test_ds = torch.load(RESULTS_DIR / "test_dataset.pt", weights_only=False)
-    # test_ds = torch.load(RESULTS_DIR / "test_dataset.pt")
     print(f"{len(test_ds):,} test sequences")
 
+    print("\nRunning performance evaluation...")
     df_pred, perf_metrics = evaluate_performance(model, test_ds, DEVICE)
 
+    print("\nRunning deployment evaluation...")
     evaluate_deployment(model, test_ds)
 
+    print("\nGenerating plots...")
     plot_training_curve()
     plot_results(df_pred)
 
-    print("\nEvaluation complete.")
-    print(f"All outputs in: {RESULTS_DIR}")
+    print("\n" + "="*60)
+    print("EVALUATION COMPLETE")
+    print("="*60)
+    print(f"\nOutput files saved in: {RESULTS_DIR}")
+    print("  - evaluation_report.csv (predictions with uncertainties)")
+    print("  - metrics_summary.csv (performance metrics)")
+    print("  - deployment_metrics.csv (latency, throughput, etc.)")
+    print("  - plots/evaluation_results.png")
+    print("  - plots/training_curve.png")
 
 if __name__ == "__main__":
     main()

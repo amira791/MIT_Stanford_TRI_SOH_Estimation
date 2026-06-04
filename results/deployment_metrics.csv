@@ -1,9 +1,9 @@
 Metric,Value
-Parameters,"266,017"
-Disk size (MB),1.09
-Peak RAM (KB),5.0
-Latency mean (ms),7.795
-Latency std (ms),1.510
-Latency p95 (ms),10.108
-Throughput (samp/s),3008
+Parameters,"270,113"
+Disk size (MB),1.10
+Peak RAM (KB),5.1
+Latency mean (ms),6.847
+Latency std (ms),1.397
+Latency p95 (ms),9.553
+Throughput (samp/s),2526
 BMS real-time OK?,YES
