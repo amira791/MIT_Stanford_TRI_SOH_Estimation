@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config_training import (
+from configurations.config_training_ import (
     RESULTS_DIR, FEATURE_COLS, TARGET_COL,
     TRAIN_FRAC, VAL_FRAC, RANDOM_SEED,
     SEQ_LEN, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY,
