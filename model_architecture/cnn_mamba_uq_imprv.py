@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from configurations.config_training_ import (
+from configurations.config_training_50 import (
     N_FEATURES, SEQ_LEN, CNN_CHANNELS, CNN_KERNEL,
     MAMBA_D_MODEL, MAMBA_D_STATE, MAMBA_N_LAYERS,
     MC_DROPOUT_P, MC_SAMPLES

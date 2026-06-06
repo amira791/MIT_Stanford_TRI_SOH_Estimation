@@ -1,10 +1,31 @@
-# configurations/config_training.py
 """
-Configuration for training only (includes model hyperparameters)
-FIXED: Uses SOH-normalised features instead of raw capacity values
+Configuration for training with 50-cycle prediction horizon
+Separate results directory to avoid overwriting 30-cycle model
 """
 
+from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────
+# CUSTOM OUTPUT PATHS FOR 50-CYCLE MODEL (prevents overwriting)
+# ─────────────────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).parent.parent
+
+# Custom results directory for 50-cycle model
+RESULTS_DIR = PROJECT_ROOT / "results_50cycle"
+MODEL_SAVE_DIR = RESULTS_DIR / "checkpoints"
+SCALER_PATH = RESULTS_DIR / "scaler.pkl"
+PLOTS_DIR = RESULTS_DIR / "plots"
+
+# Create directories
+RESULTS_DIR.mkdir(exist_ok=True)
+MODEL_SAVE_DIR.mkdir(exist_ok=True, parents=True)
+PLOTS_DIR.mkdir(exist_ok=True, parents=True)
+
+# Now import preprocessing config (for dataset constants)
 from configurations.config_preprocessing import *
+
+# Override any RESULTS_DIR from preprocessing if needed
+# (This ensures all outputs go to our custom directory)
 
 # ─────────────────────────────────────────────────────────────
 # DATASET CONSTANTS
@@ -31,15 +52,6 @@ FEATURE_COLS = [
     "temperature_max",
     "cycle_norm",
 ]
-#
-# FEATURE_COLS = [
-#     "soh_prev",                 # SOH at cycle t-1 (dimensionless)
-#     # "delta_soh",              # REMOVED - creates tautology
-#     "coulombic_eff",            # charge_cap / discharge_cap(t-1) - efficiency
-#     "dc_internal_resistance",   # resistance (Ohms) - already cell-invariant
-#     "temperature_max",          # peak temperature (°C) - already cell-invariant
-#     "cycle_norm",               # cycle / eol_cycle ∈ [0,1] - relative position
-# ]
 
 TARGET_COL = "soh"
 N_FEATURES = len(FEATURE_COLS)  # Now 5 features (was 6)
@@ -50,8 +62,8 @@ N_FEATURES = len(FEATURE_COLS)  # Now 5 features (was 6)
 TRAIN_FRAC   = 0.70
 VAL_FRAC     = 0.15
 RANDOM_SEED  = 42
-SEQ_LEN      = 50          # INCREASED from 30 to 50 (more history for long-term prediction)
-PREDICTION_HORIZON = 50    # NEW: predict 50 cycles ahead (meaningful task)
+SEQ_LEN      = 50                    # INCREASED from 30 to 50 (more history for long-term prediction)
+PREDICTION_HORIZON = 50              # NEW: predict 50 cycles ahead (meaningful task)
 
 # ─────────────────────────────────────────────────────────────
 # MODEL HYPERPARAMETERS
@@ -79,3 +91,8 @@ LR_PATIENCE   = 8
 # ─────────────────────────────────────────────────────────────
 INFERENCE_DEVICE = "cpu"
 N_INFERENCE_RUNS = 200
+
+print(f"\n[CONFIG] 50-CYCLE MODEL CONFIGURATION LOADED")
+print(f"[CONFIG] Results directory: {RESULTS_DIR}")
+print(f"[CONFIG] Prediction horizon: {PREDICTION_HORIZON} cycles")
+print(f"[CONFIG] Sequence length: {SEQ_LEN} cycles\n")

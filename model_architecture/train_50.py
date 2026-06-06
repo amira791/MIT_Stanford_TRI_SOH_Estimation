@@ -1,6 +1,5 @@
-# model_architecture/train.py
 """
-TRAIN / VAL / TEST SPLIT + MODEL TRAINING
+TRAIN / VAL / TEST SPLIT + MODEL TRAINING (50-CYCLE HORIZON)
 -------------------------------------------
 1. Loads soh_dataset.pkl (from step2)
 2. Applies CELL-OUT split -> no data leakage
@@ -9,6 +8,7 @@ TRAIN / VAL / TEST SPLIT + MODEL TRAINING
 5. Saves best checkpoint + training history
 
 UPDATED: Now supports multi-step ahead prediction (horizon = 50 cycles)
+UPDATED: Saves to separate results_50cycle directory
 """
 
 import sys
@@ -28,22 +28,24 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Import from 50-cycle config
 from configurations.config_training_50 import (
     RESULTS_DIR, FEATURE_COLS, TARGET_COL,
     TRAIN_FRAC, VAL_FRAC, RANDOM_SEED,
     SEQ_LEN, PREDICTION_HORIZON, BATCH_SIZE, LEARNING_RATE, WEIGHT_DECAY,
-    MAX_EPOCHS, PATIENCE, LR_PATIENCE
+    MAX_EPOCHS, PATIENCE, LR_PATIENCE, MODEL_SAVE_DIR, SCALER_PATH
 )
 
-from cnn_mamba_uq import CNNMambaUQ
+from cnn_mamba_uq_imprv import CNNMambaUQ
 
-MODEL_SAVE_DIR = RESULTS_DIR / "checkpoints"
-SCALER_PATH = RESULTS_DIR / "scaler.pkl"
-MODEL_SAVE_DIR.mkdir(exist_ok=True)
+# Ensure directories exist
+MODEL_SAVE_DIR.mkdir(exist_ok=True, parents=True)
+RESULTS_DIR.mkdir(exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 print(f"Prediction horizon: {PREDICTION_HORIZON} cycles ahead")
+print(f"Results directory: {RESULTS_DIR}")
 
 def cell_out_split(df: pd.DataFrame):
     """Split at the CELL level to prevent data leakage."""
@@ -143,11 +145,12 @@ def train_model(model, train_dl, val_dl, device):
     best_val = float("inf")
     patience_counter = 0
     history = []
-    ckpt_path = MODEL_SAVE_DIR / "cnn_mamba_uq_best.pt"
+    ckpt_path = MODEL_SAVE_DIR / "cnn_mamba_uq_50cycle_best.pt"  # Different name to avoid confusion
 
     print(f"\n{'='*60}")
     print(f"  Training CNN-Mamba-UQ on {device}")
     print(f"  Predicting {PREDICTION_HORIZON} cycles ahead")
+    print(f"  Saving to: {ckpt_path}")
     print(f"{'='*60}")
     print(f"  {'Epoch':>6}  {'Train MSE':>10}  {'Val MSE':>10}  {'LR':>10}  {'Time':>7}")
     print(f"  {'─'*55}")
@@ -168,6 +171,7 @@ def train_model(model, train_dl, val_dl, device):
             best_val = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), ckpt_path)
+            print(f"  *** Best model saved (val_loss: {val_loss:.6f}) ***")
         else:
             patience_counter += 1
 
@@ -183,11 +187,19 @@ def train_model(model, train_dl, val_dl, device):
 
 def main():
     print("="*60)
-    print("TRAINING SCRIPT STARTED")
+    print("TRAINING SCRIPT STARTED (50-CYCLE HORIZON)")
     print("="*60)
     print(f"Configuration: SEQ_LEN={SEQ_LEN}, HORIZON={PREDICTION_HORIZON} cycles ahead")
+    print(f"Output directory: {RESULTS_DIR}")
 
-    pkl_path = RESULTS_DIR / "soh_dataset.pkl"
+    # Load dataset from original results directory (shared dataset)
+    original_results_dir = Path(__file__).parent.parent / "results"
+    pkl_path = original_results_dir / "soh_dataset.pkl"
+    
+    if not pkl_path.exists():
+        # Fallback to current results directory
+        pkl_path = RESULTS_DIR / "soh_dataset.pkl"
+    
     print(f"\nLoading dataset from {pkl_path} ...")
     df = pd.read_pickle(pkl_path)
     print(f"  {len(df):,} rows  |  {df['cell_id'].nunique()} cells")
@@ -200,7 +212,7 @@ def main():
         pickle.dump(scaler, f)
     print(f"\n  Scaler saved -> {SCALER_PATH}")
 
-    with open(RESULTS_DIR / "test_cells.pkl", "wb") as f:
+    with open(RESULTS_DIR / "test_cells_50cycle.pkl", "wb") as f:
         pickle.dump(test_cells, f)
 
     print("\nBuilding sliding-window sequences ...")
@@ -212,7 +224,7 @@ def main():
     print(f"  Val   sequences : {len(val_ds):,}")
     print(f"  Test  sequences : {len(test_ds):,}")
 
-    torch.save(test_ds, RESULTS_DIR / "test_dataset.pt")
+    torch.save(test_ds, RESULTS_DIR / "test_dataset_50cycle.pt")
 
     train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
     val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
@@ -222,9 +234,10 @@ def main():
 
     model, history = train_model(model, train_dl, val_dl, DEVICE)
 
-    history.to_csv(RESULTS_DIR / "training_history.csv", index=False)
-    print(f"\n  Training history -> {RESULTS_DIR / 'training_history.csv'}")
+    history.to_csv(RESULTS_DIR / "training_history_50cycle.csv", index=False)
+    print(f"\n  Training history -> {RESULTS_DIR / 'training_history_50cycle.csv'}")
     print("\nTraining complete!")
+    print(f"\nAll outputs saved to: {RESULTS_DIR}")
 
 if __name__ == "__main__":
     main()
