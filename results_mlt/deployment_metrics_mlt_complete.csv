@@ -1,0 +1,10 @@
+Metric,Value
+Parameters,800179.0
+Disk Size (MB),3.231933
+Peak RAM (KB),6.7998046875
+Peak RAM (MB),0.006640434265136719
+Latency Mean (ms),39.363641052899
+Latency Std (ms),5.757049898564282
+Latency P95 (ms),48.83415484800934
+Latency P99 (ms),53.14440513961012
+Throughput (samples/sec),386.60906007082684
