@@ -1,0 +1,12 @@
+Metric,Value
+MAE  (%),3.0986
+RMSE (%),4.4568
+MAPE (%),3.2689
+R2       ,-0.053
+MaxE (%),18.8756
+PICP (%) [UQ],71.482
+PINAW    [UQ],0.2934
+EOL Accuracy (%),97.2396
+EOL F1 score,0.1549
+EOL Precision,0.0858
+EOL Recall,0.8

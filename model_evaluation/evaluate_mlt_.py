@@ -53,23 +53,27 @@ except ImportError:
     PLOT = False
     print("  matplotlib not found — skipping plots")
 
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "model_architecture"))
+
 # ── adjust these paths to match your project ──────────────────────────────
-ROOT_DIR       = Path(__file__).parent
+ROOT_DIR       = Path(__file__).parent.parent          # ← go up to project root
 RESULTS_DIR    = ROOT_DIR / "results_mlt"
 CKPT_PATH      = RESULTS_DIR / "checkpoints" / "cnn_mamba_uq_mlt_best.pt"
 DATASET_PKL    = RESULTS_DIR / "soh_dataset_mlt.pkl"
-SCALER_PKL     = RESULTS_DIR / "scaler_mlt.pkl"
+SCALER_PKL     = RESULTS_DIR / "scaler_v3.pkl"        # ← was scaler_mlt.pkl, fix name
 TEST_CELLS_PKL = RESULTS_DIR / "test_cells_mlt.pkl"
 TEST_DS_PT     = RESULTS_DIR / "test_dataset_mlt.pt"
 EVAL_DIR       = RESULTS_DIR / "evaluation_"
 PLOTS_DIR      = EVAL_DIR / "plots_"
-EVAL_DIR.mkdir(exist_ok=True)
-PLOTS_DIR.mkdir(exist_ok=True)
+EVAL_DIR.mkdir(parents=True, exist_ok=True)            # ← parents=True
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)           # ← parents=True
 
 # ── config (must match training config) ───────────────────────────────────
 FEATURE_COLS = [
     "soh_prev", "delta_soh", "coulombic_eff",
-    "dc_internal_resistance", "temperature_max", "cycle_norm",
+    "dc_ir_norm",        
+    "temperature_max", "cycle_norm",
 ]
 TARGET_COL         = "soh"
 SEQ_LEN            = 50
@@ -231,22 +235,41 @@ class CNNMambaUQ(nn.Module):
     def predict_future(self, x):
         return self.head_future(self.encode(x))
 
+    # def mc_predict(self, x):
+    #     self.train()
+    #     preds = []
+    #     for _ in range(self.mc_samples):
+    #         preds.append(self.head_future(self.encode(x)))
+    #     preds = torch.cat(preds, dim=-1)   # (B, mc_samples)
+    #     self.eval()
+    #     mean    = preds.mean(dim=-1)
+    #     std     = preds.std(dim=-1)
+    #     return {
+    #         "mean"    : mean.cpu().numpy(),
+    #         "std"     : std.cpu().numpy(),
+    #         "ci_low"  : (mean - 1.96 * std).cpu().numpy(),
+    #         "ci_high" : (mean + 1.96 * std).cpu().numpy(),
+    #         "eol_prob": self.head_eol(self.encode(x)).squeeze().cpu().detach().numpy(),
+    #     }
     def mc_predict(self, x):
-        self.train()
-        preds = []
-        for _ in range(self.mc_samples):
+      self.train()   # dropout active
+      preds = []
+      with torch.no_grad():              # ← no gradient tracking needed at inference
+         for _ in range(self.mc_samples):
             preds.append(self.head_future(self.encode(x)))
-        preds = torch.cat(preds, dim=-1)   # (B, mc_samples)
-        self.eval()
-        mean    = preds.mean(dim=-1)
-        std     = preds.std(dim=-1)
-        return {
-            "mean"    : mean.cpu().numpy(),
-            "std"     : std.cpu().numpy(),
-            "ci_low"  : (mean - 1.96 * std).cpu().numpy(),
-            "ci_high" : (mean + 1.96 * std).cpu().numpy(),
-            "eol_prob": self.head_eol(self.encode(x)).squeeze().cpu().detach().numpy(),
-        }
+         preds = torch.cat(preds, dim=-1)
+         eol   = self.head_eol(self.encode(x)).squeeze()
+      self.eval()
+
+      mean = preds.mean(dim=-1)
+      std  = preds.std(dim=-1)
+      return {
+        "mean"    : mean.cpu().numpy(),
+        "std"     : std.cpu().numpy(),
+        "ci_low"  : (mean - 1.96 * std).cpu().numpy(),
+        "ci_high" : (mean + 1.96 * std).cpu().numpy(),
+        "eol_prob": eol.cpu().numpy(),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,11 @@
+Metric,Value
+Parameters,"800,179"
+Disk size (MB),3.23
+Peak RAM (KB),6.5
+Inference latency mean (ms),13.497
+Inference latency std  (ms),5.436
+Inference latency p95  (ms),21.888
+MC-predict latency mean (ms),564.8
+Throughput (samples/s),1080
+BMS real-time OK (p95<100ms),YES
+Flash budget OK (<2MB),NO
