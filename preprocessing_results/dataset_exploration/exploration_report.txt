@@ -1,0 +1,80 @@
+================================================================================
+MIT-STANFORD FAST-CHARGING DATASET EXPLORATION REPORT
+Generated: 2026-06-10 21:08:22
+================================================================================
+
+1. DATASET OVERVIEW
+----------------------------------------
+Total JSON files found:     140
+Successfully parsed cells:  140
+Success rate:               100.0%
+Total cycles across all cells: 114,314
+Average cycles per cell:    816.5
+Median cycles per cell:     789.0
+Min cycles per cell:        1
+Max cycles per cell:        2238
+
+2. BATCH DISTRIBUTION
+----------------------------------------
+  Unknown_Batch: 140 cells (100.0%)
+
+3. CHARGING PROTOCOLS
+----------------------------------------
+Unique protocols found: 72
+  2018-04-12_batch8\20180412-5C_67per_4C_newstructure.sdu: 8 cells
+  2018-04-12_batch8\20180412-5_3C_54per_4C_newstructure.sdu: 8 cells
+  2018-04-12_batch8\20180412-5_6C_36per_4_3C_newstructure.sdu: 8 cells
+  2018-04-12_batch8\20180412-5_6C_19per_4_6C_newstructure.sdu: 8 cells
+  2018-04-12_batch8\20180412-4_8C_80per_4_8C_newstructure.sdu: 8 cells
+  2017-05-12_TESTS\20170512-3_6C-80PER_3_6C.SDU: 6 cells
+  2017-05-12_TESTS\20170512-4C-80PER_4C.SDU: 4 cells
+  2018-04-12_batch8\20180412-3_7C_31per_5_9C_newstructure.sdu: 3 cells
+  2017-06-30_tests\20170630-4_8C_80per_4_8C.sdu: 3 cells
+  2017-05-12_TESTS\20170512-8C-25PER_3_6C.SDU: 2 cells
+
+4. CAPACITY ANALYSIS
+----------------------------------------
+Nominal capacity (spec):    1.10 Ah
+Initial capacity (measured):
+  Mean:   1.201 Ah
+  Std:    0.050 Ah
+  Min:    0.995 Ah
+  Max:    1.543 Ah
+  Median: 1.198 Ah
+
+Final capacity (at EOL or end of test):
+  Mean:   1.141 Ah
+  Std:    0.416 Ah
+  Min:    0.822 Ah
+  Max:    1.781 Ah
+
+Capacity fade:
+  Mean fade:      4.1%
+  Median fade:    26.4%
+  Max fade:       34.5%
+
+Cycles to 80% capacity (EOL):
+  Mean:   722.4 cycles
+  Median: 713.0 cycles
+  Min:    1 cycles
+  Max:    2238 cycles
+  Cells that reached EOL: 127 / 140
+
+5. TEMPERATURE ANALYSIS
+----------------------------------------
+Specification (manufacturer): 15-60°C
+Observed temperature range:
+  Max temperature:
+    Mean:   40.1°C
+    Std:    2.2°C
+    Min:    33.3°C
+    Max:    44.7°C
+  Min temperature:
+    Mean:   34.6°C
+    Std:    2.3°C
+    Min:    25.9°C
+    Max:    39.3°C
+
+6. INTERNAL RESISTANCE ANALYSIS
+----------------------------------------
+Observed IR range (DC, at 80% SOC):
