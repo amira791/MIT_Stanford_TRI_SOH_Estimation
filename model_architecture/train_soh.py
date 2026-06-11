@@ -1,15 +1,13 @@
 # train_soh.py
 """
-Training Script for SOH Prediction using CNN-Mamba-UQ
----------------------------------------------------
-Trains the CNN-Mamba-UQ model for State of Health estimation
-Supports:
-- Supervised learning on all 134 cells
-- Uncertainty quantification
-- Checkpoint saving
-- Early stopping
-- Learning rate scheduling
-- TensorBoard logging
+Training Script for SOH Prediction using CNN-Mamba-UQ - FIXED VERSION
+-------------------------------------------------------------------
+Fixed issues:
+- Learning rate scheduling (Cosine warmup instead of ReduceLROnPlateau)
+- Uncertainty weight (increased from 0.05 to 0.3)
+- Dropout (reduced from 0.1 to 0.05)
+- Learning rate (increased from 3e-4 to 8e-4)
+- Loss function (added NLL for better uncertainty learning)
 """
 
 import os
@@ -24,7 +22,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from datetime import datetime
+import math
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -32,13 +30,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from cnn_mamba_uq_model import create_soh_model, get_model_summary
 
 # ============================================
-# CONFIGURATION - FIXED FOR STABLE TRAINING
+# CONFIGURATION - FIXED VERSION
 # ============================================
 
 class Config:
     # Paths
     BASE_DIR = Path(r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation")
-
     DATA_DIR = BASE_DIR / "data_preprocessing" / "final_dataset" / "soh"
     CHECKPOINT_DIR = BASE_DIR / "checkpoints" / "soh"
     LOG_DIR = BASE_DIR / "logs_model" / "soh"
@@ -53,28 +50,28 @@ class Config:
     N_FEATURES = 7
     BATCH_SIZE = 64
     
-    # Model parameters
-    DROPOUT = 0.1
+    # Model parameters - FIXED
+    DROPOUT = 0.05  # Reduced from 0.1
     
-    # Training parameters - CHANGED
+    # Training parameters - FIXED
     EPOCHS = 100
-    LEARNING_RATE = 3e-4  # CHANGED: was 1e-3 (reduced by 3x)
-    WEIGHT_DECAY = 1e-4   # CHANGED: was 1e-5 (increased by 10x)
+    LEARNING_RATE = 8e-4  # Increased from 3e-4
+    WEIGHT_DECAY = 1e-4
     
-    # Learning rate scheduling - CHANGED
-    LR_PATIENCE = 5       # CHANGED: was 10 (reduced)
-    LR_FACTOR = 0.5
-    LR_MIN = 1e-7         # CHANGED: was 1e-6 (lower minimum)
+    # Learning rate scheduling - NEW
+    USE_WARMUP = True
+    WARMUP_EPOCHS = 5
+    MIN_LR = 1e-6
     
-    # Early stopping - CHANGED
-    EARLY_STOPPING_PATIENCE = 15  # CHANGED: was 20 (reduced)
-    EARLY_STOPPING_MIN_DELTA = 1e-5  # CHANGED: was 1e-4 (more sensitive)
+    # Early stopping
+    EARLY_STOPPING_PATIENCE = 20
+    EARLY_STOPPING_MIN_DELTA = 1e-5
     
-    # Loss weights
-    UNCERTAINTY_WEIGHT = 0.05  # CHANGED: was 0.1 (reduced to prevent instability)
+    # Loss weights - FIXED
+    UNCERTAINTY_WEIGHT = 0.3  # Increased from 0.05
     
-    # Gradient clipping - CHANGED (added new parameter)
-    GRAD_CLIP_NORM = 0.5  # NEW: was hardcoded 1.0 (reduced)
+    # Gradient clipping
+    GRAD_CLIP_NORM = 0.5
     
     # Device
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -85,6 +82,41 @@ class Config:
 # Set random seed for reproducibility
 torch.manual_seed(Config.SEED)
 np.random.seed(Config.SEED)
+
+# ============================================
+# COSINE WARMUP SCHEDULER - NEW
+# ============================================
+
+class CosineWarmupScheduler:
+    """Cosine annealing learning rate scheduler with warmup"""
+    def __init__(self, optimizer, warmup_epochs=5, total_epochs=100, base_lr=8e-4, min_lr=1e-6):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+        self.current_epoch = 0
+        self.history = []
+        
+    def step(self):
+        self.current_epoch += 1
+        
+        if self.current_epoch <= self.warmup_epochs:
+            # Linear warmup
+            lr = self.base_lr * (self.current_epoch / self.warmup_epochs)
+        else:
+            # Cosine decay
+            progress = (self.current_epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        self.history.append(lr)
+        return lr
+    
+    def get_last_lr(self):
+        return self.optimizer.param_groups[0]['lr']
 
 # ============================================
 # DATA LOADING
@@ -135,7 +167,7 @@ class SOHDataLoader:
             batch_size=Config.BATCH_SIZE, 
             shuffle=True,
             num_workers=0,
-            drop_last=False  # Keep all data
+            drop_last=False
         )
         val_loader = DataLoader(
             val_dataset, 
@@ -153,42 +185,40 @@ class SOHDataLoader:
         return train_loader, val_loader, test_loader
 
 # ============================================
-# LOSS FUNCTIONS - CHANGED (Added numerical stability)
+# LOSS FUNCTIONS - IMPROVED VERSION
 # ============================================
 
 class SOHLoss(nn.Module):
     """
-    Loss function for SOH prediction with uncertainty
-    Loss = MSE(pred, target) + λ * uncertainty
+    Improved loss function for SOH prediction with uncertainty
+    Uses Negative Log Likelihood for better uncertainty learning
     """
-    def __init__(self, uncertainty_weight: float = 0.05):
+    def __init__(self, uncertainty_weight: float = 0.3):
         super().__init__()
         self.uncertainty_weight = uncertainty_weight
         
     def forward(self, pred, target, uncertainty):
-        # Ensure values are finite
-        pred = torch.clamp(pred, 0.0, 1.0)  # CHANGED: Clamp SOH predictions
+        # Clamp for stability
+        pred = torch.clamp(pred, 0.0, 1.0)
         target = torch.clamp(target, 0.0, 1.0)
-        uncertainty = torch.clamp(uncertainty, 1e-6, 1.0)  # CHANGED: Prevent zero/negative
+        uncertainty = torch.clamp(uncertainty, 1e-6, 0.1)
         
         # MSE loss
         mse_loss = nn.functional.mse_loss(pred, target)
         
-        # Check for NaN
-        if torch.isnan(mse_loss):
-            return torch.tensor(1.0, device=pred.device, requires_grad=True), mse_loss, torch.tensor(0.0)
+        # Negative Log Likelihood loss (better for uncertainty)
+        nll_loss = 0.5 * torch.mean(
+            torch.log(uncertainty) + ((pred - target) ** 2) / (uncertainty + 1e-6)
+        )
         
-        # Uncertainty regularization
-        uncertainty_loss = uncertainty.mean()
+        # Combined loss
+        total_loss = mse_loss + self.uncertainty_weight * nll_loss
         
-        # Total loss
-        total_loss = mse_loss + self.uncertainty_weight * uncertainty_loss
-        
-        return total_loss, mse_loss, uncertainty_loss
+        return total_loss, mse_loss, nll_loss
 
 
 # ============================================
-# TRAINER - CHANGED (Added stability improvements)
+# TRAINER - FIXED VERSION
 # ============================================
 
 class SOHTrainer:
@@ -201,22 +231,21 @@ class SOHTrainer:
         self.test_loader = test_loader
         self.config = config
         
-        # Optimizer - CHANGED (added betas)
+        # Optimizer
         self.optimizer = optim.AdamW(
             model.parameters(),
             lr=config.LEARNING_RATE,
             weight_decay=config.WEIGHT_DECAY,
-            betas=(0.9, 0.999)  # Added explicit betas
+            betas=(0.9, 0.95)  # Optimized betas
         )
         
-        # Learning rate scheduler
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        # Cosine warmup scheduler - NEW
+        self.scheduler = CosineWarmupScheduler(
             self.optimizer,
-            mode='min',
-            factor=config.LR_FACTOR,
-            patience=config.LR_PATIENCE,
-            min_lr=config.LR_MIN,
-            verbose=True  # CHANGED: Enabled to see LR changes
+            warmup_epochs=config.WARMUP_EPOCHS,
+            total_epochs=config.EPOCHS,
+            base_lr=config.LEARNING_RATE,
+            min_lr=config.MIN_LR
         )
         
         # Loss function
@@ -227,7 +256,9 @@ class SOHTrainer:
         self.val_losses = []
         self.train_mse = []
         self.val_mse = []
-        self.learning_rates = []  # NEW: Track LR
+        self.train_unc = []
+        self.val_unc = []
+        self.learning_rates = []
         self.best_val_loss = float('inf')
         self.early_stopping_counter = 0
         
@@ -253,7 +284,7 @@ class SOHTrainer:
                 continue
             
             # Compute loss
-            loss, mse_loss, uncertainty_loss = self.criterion(pred, y_batch, uncertainty)
+            loss, mse_loss, unc_loss = self.criterion(pred, y_batch, uncertainty)
             
             # Skip if loss is NaN
             if torch.isnan(loss):
@@ -262,8 +293,6 @@ class SOHTrainer:
             
             # Backward pass with gradient clipping
             loss.backward()
-            
-            # CHANGED: Use configurable gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.GRAD_CLIP_NORM)
             
             # Check for exploding gradients
@@ -274,7 +303,7 @@ class SOHTrainer:
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm ** 0.5
             
-            if total_norm > 10:  # Exploding gradient detected
+            if total_norm > 10:
                 print(f"Warning: Gradient norm {total_norm:.2f} > 10, skipping update")
                 continue
             
@@ -282,7 +311,7 @@ class SOHTrainer:
             
             total_loss += loss.item()
             total_mse += mse_loss.item()
-            total_uncertainty += uncertainty_loss.item()
+            total_uncertainty += unc_loss.item()
             valid_batches += 1
         
         if valid_batches == 0:
@@ -309,16 +338,16 @@ class SOHTrainer:
                 
                 # Clamp predictions
                 pred = torch.clamp(pred, 0.0, 1.0)
-                uncertainty = torch.clamp(uncertainty, 1e-6, 1.0)
+                uncertainty = torch.clamp(uncertainty, 1e-6, 0.1)
                 
-                loss, mse_loss, uncertainty_loss = self.criterion(pred, y_batch, uncertainty)
+                loss, mse_loss, unc_loss = self.criterion(pred, y_batch, uncertainty)
                 
                 if torch.isnan(loss):
                     continue
                 
                 total_loss += loss.item()
                 total_mse += mse_loss.item()
-                total_uncertainty += uncertainty_loss.item()
+                total_uncertainty += unc_loss.item()
                 valid_batches += 1
         
         if valid_batches == 0:
@@ -334,8 +363,10 @@ class SOHTrainer:
         print(f"    Device: {self.config.DEVICE}")
         print(f"    Epochs: {self.config.EPOCHS}")
         print(f"    Learning rate: {self.config.LEARNING_RATE}")
+        print(f"    Warmup epochs: {self.config.WARMUP_EPOCHS}")
         print(f"    Batch size: {self.config.BATCH_SIZE}")
         print(f"    Gradient clip norm: {self.config.GRAD_CLIP_NORM}")
+        print(f"    Uncertainty weight: {self.config.UNCERTAINTY_WEIGHT}")
         
         for epoch in range(1, self.config.EPOCHS + 1):
             try:
@@ -344,10 +375,7 @@ class SOHTrainer:
                 
                 # Check for NaN
                 if np.isnan(train_loss):
-                    print(f"Epoch {epoch}: NaN training loss, reducing learning rate...")
-                    # Reduce LR and continue
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] *= 0.5
+                    print(f"Epoch {epoch}: NaN training loss, skipping...")
                     continue
                 
                 # Validate
@@ -357,18 +385,17 @@ class SOHTrainer:
                     print(f"Epoch {epoch}: NaN validation loss, skipping...")
                     continue
                 
+                # Update learning rate
+                current_lr = self.scheduler.step()
+                
                 # Store losses
                 self.train_losses.append(train_loss)
                 self.val_losses.append(val_loss)
                 self.train_mse.append(train_mse)
                 self.val_mse.append(val_mse)
-                
-                # Get current learning rate
-                current_lr = self.optimizer.param_groups[0]['lr']
+                self.train_unc.append(train_unc)
+                self.val_unc.append(val_unc)
                 self.learning_rates.append(current_lr)
-                
-                # Learning rate scheduling
-                self.scheduler.step(val_loss)
                 
                 # Print progress
                 print(f"\nEpoch {epoch}/{self.config.EPOCHS}")
@@ -381,7 +408,7 @@ class SOHTrainer:
                     self.best_val_loss = val_loss
                     self.early_stopping_counter = 0
                     self.save_checkpoint(epoch, val_loss, is_best=True)
-                    print(f"  ✓ New best model saved!")
+                    print(f"  ✓ New best model saved! (Loss improved to {val_loss:.6f})")
                 else:
                     self.early_stopping_counter += 1
                     if self.early_stopping_counter >= self.config.EARLY_STOPPING_PATIENCE:
@@ -442,7 +469,7 @@ class SOHTrainer:
         uncertainties = []
         
         with torch.no_grad():
-            for X_batch, y_batch in self.test_loader:
+            for X_batch, y_batch in tqdm(self.test_loader, desc="Evaluating"):
                 X_batch = X_batch.to(self.config.DEVICE)
                 pred, uncertainty = self.model(X_batch)
                 
@@ -468,6 +495,10 @@ class SOHTrainer:
         ss_tot = np.sum((targets - np.mean(targets)) ** 2)
         r2 = 1 - (ss_res / (ss_tot + 1e-8))
         
+        # Calibration error (uncertainty quality)
+        # Good uncertainty: error ≈ uncertainty
+        calibration_error = np.mean(np.abs(uncertainties - np.abs(predictions - targets)))
+        
         results = {
             'mse': float(mse),
             'rmse': float(rmse),
@@ -475,25 +506,30 @@ class SOHTrainer:
             'mape': float(mape),
             'r2': float(r2),
             'mean_uncertainty': float(np.mean(uncertainties)),
-            'std_uncertainty': float(np.std(uncertainties))
+            'std_uncertainty': float(np.std(uncertainties)),
+            'calibration_error': float(calibration_error)
         }
         
-        print(f"\nTest Results:")
+        print(f"\n{'='*50}")
+        print("TEST RESULTS")
+        print(f"{'='*50}")
         print(f"  MSE:  {mse:.6f}")
-        print(f"  RMSE: {rmse:.6f}")
-        print(f"  MAE:  {mae:.6f}")
+        print(f"  RMSE: {rmse:.6f} ({rmse*100:.2f}% error)")
+        print(f"  MAE:  {mae:.6f} ({mae*100:.2f}% error)")
         print(f"  MAPE: {mape:.2f}%")
         print(f"  R²:   {r2:.4f}")
         print(f"  Mean Uncertainty: {results['mean_uncertainty']:.6f}")
+        print(f"  Calibration Error: {calibration_error:.6f}")
+        print(f"{'='*50}")
         
         return results, predictions, targets, uncertainties
     
     def plot_training_history(self):
         """Plot training history"""
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         
         # Loss plot
-        ax1 = axes[0]
+        ax1 = axes[0, 0]
         ax1.plot(self.train_losses, label='Train Loss', alpha=0.7)
         ax1.plot(self.val_losses, label='Val Loss', alpha=0.7)
         ax1.set_xlabel('Epoch')
@@ -503,7 +539,7 @@ class SOHTrainer:
         ax1.grid(True, alpha=0.3)
         
         # MSE plot
-        ax2 = axes[1]
+        ax2 = axes[0, 1]
         ax2.plot(self.train_mse, label='Train MSE', alpha=0.7)
         ax2.plot(self.val_mse, label='Val MSE', alpha=0.7)
         ax2.set_xlabel('Epoch')
@@ -512,14 +548,25 @@ class SOHTrainer:
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # Learning rate plot - NEW
-        ax3 = axes[2]
-        ax3.plot(self.learning_rates, alpha=0.7)
-        ax3.set_xlabel('Epoch')
-        ax3.set_ylabel('Learning Rate')
-        ax3.set_title('Learning Rate Schedule')
-        ax3.set_yscale('log')
-        ax3.grid(True, alpha=0.3)
+        # Learning rate plot
+        ax3 = axes[1, 0]
+        if len(self.learning_rates) > 0:
+            ax3.plot(self.learning_rates, alpha=0.7)
+            ax3.set_xlabel('Epoch')
+            ax3.set_ylabel('Learning Rate')
+            ax3.set_title('Learning Rate Schedule')
+            ax3.set_yscale('log')
+            ax3.grid(True, alpha=0.3)
+        
+        # Uncertainty plot
+        ax4 = axes[1, 1]
+        ax4.plot(self.train_unc, label='Train Uncertainty', alpha=0.7)
+        ax4.plot(self.val_unc, label='Val Uncertainty', alpha=0.7)
+        ax4.set_xlabel('Epoch')
+        ax4.set_ylabel('Uncertainty Loss')
+        ax4.set_title('Uncertainty Learning')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(self.config.RESULTS_DIR / "training_history.png", dpi=150)
@@ -540,13 +587,28 @@ class SOHTrainer:
         ax1.legend()
         plt.colorbar(scatter, ax=ax1, label='Uncertainty')
         
-        # Uncertainty vs error
+        # Uncertainty calibration
         ax2 = axes[1]
         errors = np.abs(predictions - targets)
-        ax2.scatter(uncertainties, errors, alpha=0.5, s=10)
+        
+        # Bin by uncertainty for calibration curve
+        bins = np.linspace(0, np.percentile(uncertainties, 95), 20)
+        bin_centers = []
+        bin_errors = []
+        
+        for i in range(len(bins)-1):
+            mask = (uncertainties >= bins[i]) & (uncertainties < bins[i+1])
+            if mask.any():
+                bin_centers.append((bins[i] + bins[i+1]) / 2)
+                bin_errors.append(np.mean(errors[mask]))
+        
+        ax2.scatter(uncertainties, errors, alpha=0.3, s=5, label='Individual predictions')
+        ax2.plot(bin_centers, bin_centers, 'r--', label='Perfect calibration')
+        ax2.plot(bin_centers, bin_errors, 'b-', linewidth=2, label='Actual calibration')
         ax2.set_xlabel('Predicted Uncertainty')
         ax2.set_ylabel('Absolute Error')
-        ax2.set_title('Uncertainty vs Error')
+        ax2.set_title('Uncertainty Calibration')
+        ax2.legend()
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -564,9 +626,11 @@ class SOHTrainer:
         ax1 = axes[0]
         ax1.hist(errors, bins=50, edgecolor='black', alpha=0.7)
         ax1.axvline(x=0, color='red', linestyle='--')
+        ax1.axvline(x=np.mean(errors), color='blue', linestyle='--', label=f'Mean: {np.mean(errors):.4f}')
         ax1.set_xlabel('Prediction Error')
         ax1.set_ylabel('Frequency')
         ax1.set_title('Error Distribution')
+        ax1.legend()
         ax1.grid(True, alpha=0.3)
         
         # Box plot by SOH range
@@ -600,10 +664,11 @@ class SOHTrainer:
 
 def main():
     print("=" * 60)
-    print("TRAINING CNN-MAMBA-UQ FOR SOH PREDICTION")
+    print("TRAINING CNN-MAMBA-UQ FOR SOH PREDICTION - FIXED VERSION")
     print("=" * 60)
     
     print(f"\nDevice: {Config.DEVICE}")
+    print(f"PyTorch version: {torch.__version__}")
     
     # Load data
     data_loader = SOHDataLoader(Config.DATA_DIR, Config.SEQUENCE_LENGTH)
@@ -648,7 +713,8 @@ def main():
     predictions_df = pd.DataFrame({
         'true_soh': targets,
         'predicted_soh': predictions,
-        'uncertainty': uncertainties
+        'uncertainty': uncertainties,
+        'absolute_error': np.abs(predictions - targets)
     })
     predictions_df.to_csv(Config.RESULTS_DIR / "predictions.csv", index=False)
     
@@ -663,6 +729,8 @@ def main():
     print(f"\nResults saved to: {Config.RESULTS_DIR}")
     print(f"Model saved to: {Config.CHECKPOINT_DIR}")
     print(f"Logs saved to: {Config.LOG_DIR}")
+    print(f"\nFinal Test R² Score: {results['r2']:.4f}")
+    print(f"Final Test RMSE: {results['rmse']:.4f} ({results['rmse']*100:.2f}%)")
 
 
 if __name__ == "__main__":
