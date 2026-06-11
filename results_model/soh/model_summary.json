@@ -1,0 +1,8 @@
+{
+  "total_parameters": 1966658,
+  "trainable_parameters": 1966658,
+  "model_size_mb": 7.502204895019531,
+  "prediction_type": "soh",
+  "input_dim": 7,
+  "seq_len": 50
+}
