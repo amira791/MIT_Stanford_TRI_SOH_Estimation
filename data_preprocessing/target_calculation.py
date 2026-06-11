@@ -173,11 +173,17 @@ def save_combined_dataset(df: pd.DataFrame, train_df: pd.DataFrame, val_df: pd.D
     combined_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
     
     # Select final columns
+    # final_columns = [
+    #     "cell_id", "barcode", "channel", "batch", "protocol",
+    #     "split",  # train/val/test indicator
+    #     "cycle_index", "total_cycles",
+    # ] + FINAL_FEATURES + [SOH_TARGET, RUL_TARGET]
+
     final_columns = [
-        "cell_id", "barcode", "channel", "batch", "protocol",
-        "split",  # train/val/test indicator
-        "cycle_index", "total_cycles",
-    ] + FINAL_FEATURES + [SOH_TARGET, RUL_TARGET]
+    "cell_id", "barcode", "channel", "batch", "protocol",
+    "split",
+    "cycle_index", "total_cycles",  # Only once!
+     ] + [f for f in FINAL_FEATURES if f != "cycle_index"] + [SOH_TARGET, RUL_TARGET]
     
     combined_df = combined_df[final_columns]
     
