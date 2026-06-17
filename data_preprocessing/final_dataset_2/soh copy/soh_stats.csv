@@ -1,0 +1,2 @@
+total_rows,total_cells,train_rows,train_cells,val_rows,val_cells,test_rows,test_cells,soh_min,soh_max,soh_mean,features
+113896,134,78741,93,10918,13,24237,28,0.7611873745918274,1.0,0.9644006490707397,"['cycle_index', 'dc_internal_resistance', 'temperature_avg', 'charge_capacity', 'charge_energy', 'coulombic_efficiency_lagged_1', 'coulombic_efficiency_lagged_2']"

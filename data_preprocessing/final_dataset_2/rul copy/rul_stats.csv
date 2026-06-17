@@ -1,0 +1,2 @@
+total_rows,total_cells,labeled_cells_total,unlabeled_cells_total,train_rows,train_labeled_rows,train_unlabeled_rows,train_labeled_cells,train_unlabeled_cells,val_rows,test_rows,rul_min,rul_max,rul_mean,features,semi_supervised_method,unlabeled_placeholder
+113896,134,34,100,78741,11707,67034,23,70,10918,24237,0.0,738.0,239.70385658686166,"['cycle_index', 'dc_internal_resistance', 'temperature_avg', 'charge_capacity', 'charge_energy', 'coulombic_efficiency_lagged_1', 'coulombic_efficiency_lagged_2']",consistency_regularization_and_ranking,-1

@@ -1,0 +1,2 @@
+total_physical_cells,total_channels,total_rows,train_rows,val_rows,test_rows,train_cells,val_cells,test_cells,soh_min,soh_max,soh_mean,rul_min,rul_max,rul_mean,censored_rows,censored_cells,cycle_min,cycle_max
+134,139,113896,78741,10918,24237,93,13,28,0.7611874,1.0,0.96440065,0,738,239.70385658686166,96938,100,3,2237
