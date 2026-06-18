@@ -8,12 +8,11 @@ from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 
 # Paths
-FINAL_DATASET_DIR = Path(__file__).parent / "final_dataset_2"
+FINAL_DATASET_DIR = Path(__file__).parent / "final_dataset"
 SOH_DIR = FINAL_DATASET_DIR / "soh"
 RUL_DIR = FINAL_DATASET_DIR / "rul"
 
 # Create directories
-FINAL_DATASET_DIR.mkdir(exist_ok=True)
 SOH_DIR.mkdir(exist_ok=True)
 RUL_DIR.mkdir(exist_ok=True)
 
