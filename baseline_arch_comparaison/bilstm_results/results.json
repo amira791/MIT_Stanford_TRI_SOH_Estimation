@@ -1,0 +1,25 @@
+{
+  "train_mae_pct": 0.13864681823179126,
+  "train_rmse_pct": 0.22533474586778102,
+  "train_r2": 0.9974855184555054,
+  "val_mae_pct": 0.13978034257888794,
+  "val_rmse_pct": 0.25460292182261157,
+  "val_r2": 0.9967133402824402,
+  "test_mae_pct": 0.13707842445001006,
+  "test_rmse_pct": 0.21761465613809525,
+  "test_r2": 0.9976752996444702,
+  "n_params": 538881,
+  "config": {
+    "window_size": 50,
+    "stride": 2,
+    "batch_size": 256,
+    "hidden_size": 128,
+    "num_layers": 2,
+    "dropout": 0.15,
+    "learning_rate": 0.001,
+    "epochs": 120,
+    "patience": 25,
+    "device": "cuda",
+    "seed": 42
+  }
+}
