@@ -1,535 +1,465 @@
-# train_soh_only.py - SOH ONLY (extracted from your full code)
+"""
+================================================================================
+FEATURE IMPORTANCE ANALYSIS - SPECIFIED FEATURES ONLY
+================================================================================
 
-import os, math, warnings
+This script calculates feature importance for the following features:
+1. Summary features (10):
+   - cycle_index
+   - discharge_capacity
+   - charge_capacity
+   - discharge_energy
+   - charge_energy
+   - dc_internal_resistance
+   - temperature_maximum
+   - temperature_average
+   - temperature_minimum
+   - date_time_iso_numeric
+
+2. Lagged CE features (2):
+   - coulombic_efficiency_lagged_1
+   - coulombic_efficiency_lagged_2
+
+3. Engineered features (4):
+   - cap_rel
+   - energy_rel
+   - ir_rel
+   - cycle_pos
+
+Total: 16 features
+================================================================================
+"""
+
+import warnings
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_absolute_error
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import seaborn as sns
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.model_selection import train_test_split
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
 warnings.filterwarnings("ignore")
 
-SEED = 42
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
+# ============================================================
+# PATHS & CONFIGURATION
+# ============================================================
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {DEVICE}")
+# NEW: Use the dataset with ALL features from results2
+DATA_PATH = Path(__file__).parent.parent / "results2" / "soh_dataset_all_features.pkl"
+OUTPUT_DIR = Path(__file__).parent.parent / "feature_selection_results"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1.  Config - SOH ONLY
-# ─────────────────────────────────────────────────────────────────────────────
-CFG = dict(
-    # Paths
-    soh_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\soh_best.pt",
+RANDOM_STATE = 42
+FSS_KEEP_THRESHOLD = 0.50
+
+# ============================================================
+# FEATURE DEFINITIONS - ONLY YOUR SPECIFIED FEATURES
+# ============================================================
+
+# Summary features (10)
+SUMMARY_FEATURES = [
+    "cycle_index",
+    "discharge_capacity",
+    "charge_capacity",
+    "discharge_energy",
+    "charge_energy",
+    "dc_internal_resistance",
+    "temperature_maximum",
+    "temperature_average",
+    "temperature_minimum",
+    "date_time_iso_numeric",
+]
+
+# Lagged CE features (2)
+CE_FEATURES = [
+    "coulombic_efficiency_lagged_1",
+    "coulombic_efficiency_lagged_2",
+]
+
+# Engineered features (4)
+ENGINEERED_FEATURES = [
+    "cap_rel",
+    "energy_rel",
+    "ir_rel",
+    "cycle_pos",
+]
+
+# FULL FEATURE LIST (16 features)
+FEAT_COLS = SUMMARY_FEATURES + CE_FEATURES + ENGINEERED_FEATURES
+
+# Human-readable names
+FEAT_NAMES = {
+    "cycle_index": "Cycle Index",
+    "discharge_capacity": "Discharge Capacity",
+    "charge_capacity": "Charge Capacity",
+    "discharge_energy": "Discharge Energy",
+    "charge_energy": "Charge Energy",
+    "dc_internal_resistance": "Internal Resistance",
+    "temperature_maximum": "Max Temperature",
+    "temperature_average": "Average Temperature",
+    "temperature_minimum": "Min Temperature",
+    "date_time_iso_numeric": "Timestamp",
+    "coulombic_efficiency_lagged_1": "CE (t-1)",
+    "coulombic_efficiency_lagged_2": "CE (t-2)",
+    "cap_rel": "Relative Capacity",
+    "energy_rel": "Relative Energy",
+    "ir_rel": "Relative Resistance",
+    "cycle_pos": "Cycle Position",
+}
+
+# ============================================================
+# TARGET LEAKAGE SCORES
+# ============================================================
+
+def get_target_leakage_score(feature):
+    """
+    Target Leakage Score:
+    - 1.0 = Directly used to compute SOH (discharge_capacity)
+    - 0.8 = Strongly correlated with discharge_capacity (discharge_energy)
+    - 0.0 = Not related to SOH (all other features)
+    """
+    if feature == "discharge_capacity":
+        return 1.0
+    elif feature == "discharge_energy":
+        return 0.8
+    else:
+        return 0.0
+
+# ============================================================
+# DATA LOADING
+# ============================================================
+
+def load_data():
+    """Load the dataset with ALL features"""
+    print("\n[1] Loading data...")
+    df = pd.read_pickle(DATA_PATH)
+    print(f"  Shape: {df.shape}")
+    print(f"  Cells: {df['cell_id'].nunique()}")
     
-    # Features
-    input_dim = 10,
-    window_size = 50,
-    soh_stride = 2,
+    # Remove any rows with NaN in feature columns or target
+    df = df.dropna(subset=FEAT_COLS + ["soh"])
+    print(f"  After dropping NaN: {df.shape}")
     
-    # Model
-    cnn_channels = [32, 64, 128],
-    cnn_kernels = [3, 7, 15],
-    d_model = 128,
-    d_state = 16,
-    d_conv = 4,
-    expand = 2,
-    n_mamba_layers = 3,
-    dropout = 0.15,
+    # Ensure all features are numeric
+    for col in FEAT_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Training - SOH only
-    soh_epochs = 120,
-    soh_lr = 2e-4,
-    soh_batch = 256,
-    soh_wd = 1e-4,
-    soh_patience = 25,
-    tail_weight = 3.0,
-    warmup_epochs = 10,
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.  Data loading & preprocessing (SOH only)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add per-cell relative features"""
-    df = df.copy()
-    cap_rel_list, en_rel_list, ir_rel_list, cycle_pos_list = [], [], [], []
-
-    for cell_id, cell_df in df.groupby("cell_id"):
-        cell_df = cell_df.sort_values("cycle_index")
-        early = cell_df.iloc[:10]
-
-        nom_cap = early["charge_capacity"].mean()
-        nom_energy = early["charge_energy"].mean()
-        nom_ir = early["dc_internal_resistance"].mean()
-        min_cycle = cell_df["cycle_index"].min()
-        max_cycle = cell_df["cycle_index"].max()
-        cyc_range = max(max_cycle - min_cycle, 1)
-
-        cap_rel_list.append((cell_df["charge_capacity"] - nom_cap) / (nom_cap + 1e-9))
-        en_rel_list.append((cell_df["charge_energy"] - nom_energy) / (nom_energy + 1e-9))
-        ir_rel_list.append((cell_df["dc_internal_resistance"] - nom_ir) / (nom_ir + 1e-9))
-        cycle_pos_list.append((cell_df["cycle_index"] - min_cycle) / cyc_range)
-
-    df["cap_rel"] = pd.concat(cap_rel_list)
-    df["energy_rel"] = pd.concat(en_rel_list)
-    df["ir_rel"] = pd.concat(ir_rel_list)
-    df["cycle_pos"] = pd.concat(cycle_pos_list)
     return df
 
 
-FEAT_COLS = [
-    "dc_internal_resistance", "temperature_avg",
-    "charge_capacity", "charge_energy",
-    "coulombic_efficiency_lagged_1", "coulombic_efficiency_lagged_2",
-    "cap_rel", "energy_rel", "ir_rel", "cycle_pos",
-]
+def split_cells(df):
+    """Split by cell_id for training/test"""
+    cell_ids = df["cell_id"].unique()
+    train_ids, test_ids = train_test_split(
+        cell_ids, test_size=0.2, random_state=RANDOM_STATE
+    )
+    train_df = df[df["cell_id"].isin(train_ids)].copy()
+    test_df = df[df["cell_id"].isin(test_ids)].copy()
 
+    print(f"\n  Cell split: {len(train_ids)} train / {len(test_ids)} test")
+    return train_df, test_df
 
-def load_soh_data(soh_path):
-    """Load and preprocess SOH data only"""
-    soh = pd.read_csv(soh_path)
-    soh = add_relative_features(soh)
-    
-    # Fit scaler on train split
-    scaler = StandardScaler()
-    scaler.fit(soh[soh.split == "train"][FEAT_COLS].values)
-    soh[FEAT_COLS] = scaler.transform(soh[FEAT_COLS].values)
-    
-    return soh, scaler
+# ============================================================
+# CORRELATION WITH SOH
+# ============================================================
 
+def compute_correlation_soh(df):
+    print("\n[2] Computing correlation with SOH...")
 
-class SequenceDataset(Dataset):
-    """Sliding-window dataset for SOH"""
-    def __init__(self, df, window_size, stride=1, split=None,
-                 weighted=False, tail_thr=0.90, tail_weight=1.0):
-        self.samples = []
-        self.weights = []
-        subset = df if split is None else df[df.split == split]
+    pearson_corr = {}
 
-        for _, cell_df in subset.groupby("cell_id"):
-            cell_df = cell_df.sort_values("cycle_index").reset_index(drop=True)
-            X = cell_df[FEAT_COLS].values.astype(np.float32)
-            y = cell_df["soh"].values.astype(np.float32)
+    for cell_id, cell_df in df.groupby("cell_id"):
+        cell_df = cell_df.sort_values("cycle_index")
+        for feat in FEAT_COLS:
+            if feat in cell_df.columns:
+                corr = cell_df[feat].corr(cell_df["soh"])
+                if not np.isnan(corr):
+                    pearson_corr.setdefault(feat, []).append(abs(corr))
 
-            for end in range(window_size, len(X) + 1, stride):
-                start = end - window_size
-                y_last = y[end - 1]
-                self.samples.append((X[start:end], y_last))
-                if weighted:
-                    w = tail_weight if y_last < tail_thr else 1.0
-                else:
-                    w = 1.0
-                self.weights.append(w)
+    avg_corr = {f: np.mean(pearson_corr[f]) for f in FEAT_COLS if f in pearson_corr}
 
-        self.weights = np.array(self.weights, dtype=np.float32)
+    print("\n  Correlation with SOH:")
+    for feat in FEAT_COLS:
+        name = FEAT_NAMES.get(feat, feat)
+        print(f"    {name:<30} {avg_corr.get(feat, 0):>10.4f}")
 
-    def __len__(self):
-        return len(self.samples)
+    return avg_corr
 
-    def __getitem__(self, idx):
-        x, y = self.samples[idx]
-        return torch.tensor(x), torch.tensor(y), torch.tensor(self.weights[idx])
+# ============================================================
+# MUTUAL INFORMATION
+# ============================================================
 
+def compute_mutual_information(df):
+    print("\n[3] Computing Mutual Information...")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3.  Model (SOH head only)
-# ─────────────────────────────────────────────────────────────────────────────
+    X = df[FEAT_COLS].values
+    y = df["soh"].values
 
-class MultiScaleCNN(nn.Module):
-    def __init__(self, input_dim, channels, kernels, dropout=0.1):
-        super().__init__()
-        self.branches = nn.ModuleList()
-        for ch, k in zip(channels, kernels):
-            self.branches.append(nn.Sequential(
-                nn.Conv1d(input_dim, ch, kernel_size=k, padding=k//2, bias=False),
-                nn.BatchNorm1d(ch), nn.GELU(),
-                nn.Conv1d(ch, ch, kernel_size=k, padding=k//2, bias=False),
-                nn.BatchNorm1d(ch), nn.GELU(),
-            ))
-        self.out_dim = sum(channels)
-        self.dropout = nn.Dropout(dropout)
-        self.proj = nn.Linear(self.out_dim, self.out_dim)
+    mi_scores = mutual_info_regression(X, y, random_state=RANDOM_STATE)
+    mi_dict = {feat: mi for feat, mi in zip(FEAT_COLS, mi_scores)}
 
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        outs = [b(x) for b in self.branches]
-        x = torch.cat(outs, dim=1).permute(0, 2, 1)
-        return self.dropout(F.gelu(self.proj(x)))
+    mi_max = max(mi_dict.values()) if mi_dict and max(mi_dict.values()) > 0 else 1
+    mi_normalized = {f: mi / mi_max for f, mi in mi_dict.items()}
 
+    print("\n  Mutual Information (normalized):")
+    for feat in FEAT_COLS:
+        name = FEAT_NAMES.get(feat, feat)
+        print(f"    {name:<30} {mi_normalized.get(feat, 0):>10.4f}")
 
-class MambaBlock(nn.Module):
-    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
-        super().__init__()
-        self.d_model = d_model
-        self.d_state = d_state
-        self.d_inner = int(expand * d_model)
+    return mi_normalized
 
-        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
-        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner,
-                                kernel_size=d_conv, padding=d_conv-1,
-                                groups=self.d_inner, bias=True)
-        self.x_proj = nn.Linear(self.d_inner, d_state + d_state + 1, bias=False)
-        self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
+# ============================================================
+# REDUNDANCY
+# ============================================================
 
-        A = torch.arange(1, d_state+1, dtype=torch.float32).unsqueeze(0)
-        self.A_log = nn.Parameter(torch.log(A.expand(self.d_inner, -1)))
-        self.D = nn.Parameter(torch.ones(self.d_inner))
+def compute_redundancy(df):
+    print("\n[4] Computing redundancy...")
 
-        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+    corr_matrix = df[FEAT_COLS].corr().abs()
 
-    def ssm(self, x):
-        B, L, D = x.shape
-        N = self.d_state
-        dBC = self.x_proj(x)
-        delta = F.softplus(self.dt_proj(dBC[..., :1]))
-        B_ssm = dBC[..., 1:N+1]
-        C_ssm = dBC[..., N+1:]
-        A = -torch.exp(self.A_log)
-        dA = torch.exp(delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))
-        dB_u = delta.unsqueeze(-1) * B_ssm.unsqueeze(2) * x.unsqueeze(-1)
-        h = torch.zeros(B, D, N, device=x.device, dtype=x.dtype)
-        ys = []
-        for t in range(L):
-            h = dA[:, t] * h + dB_u[:, t]
-            ys.append((h * C_ssm[:, t].unsqueeze(1)).sum(-1))
-        y = torch.stack(ys, dim=1)
-        return y + x * self.D.unsqueeze(0).unsqueeze(0)
+    max_corr = {}
+    for feat in FEAT_COLS:
+        corr_values = corr_matrix[feat].drop(feat)
+        max_corr[feat] = corr_values.max()
 
-    def forward(self, x):
-        res = x
-        x = self.norm(x)
-        xz = self.in_proj(x)
-        x_, z = xz.chunk(2, dim=-1)
-        x_c = self.conv1d(x_.permute(0,2,1))[..., :x_.shape[1]].permute(0,2,1)
-        y = self.ssm(F.silu(x_c)) * F.silu(z)
-        return self.dropout(self.out_proj(y)) + res
+    print("\n  Maximum correlation with other features:")
+    for feat in FEAT_COLS:
+        name = FEAT_NAMES.get(feat, feat)
+        print(f"    {name:<30} {max_corr[feat]:>10.4f}")
 
+    return max_corr, corr_matrix
 
-class MambaEncoder(nn.Module):
-    def __init__(self, d_model, d_state, d_conv, expand, n_layers, dropout):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            MambaBlock(d_model, d_state, d_conv, expand, dropout)
-            for _ in range(n_layers)
-        ])
-        self.norm = nn.LayerNorm(d_model)
+# ============================================================
+# VIF (Multicollinearity)
+# ============================================================
 
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
+def compute_vif(df):
+    print("\n[5] Computing VIF...")
 
+    X = df[FEAT_COLS].values
+    X_with_const = np.column_stack([np.ones(len(df)), X])
 
-class CNNMambaSOH(nn.Module):
-    """CNN-Mamba with SOH head only (Gaussian-NLL for uncertainty)"""
-    def __init__(self, cfg):
-        super().__init__()
-        C = cfg
-        
-        # CNN
-        self.cnn = MultiScaleCNN(C["input_dim"], C["cnn_channels"],
-                                 C["cnn_kernels"], C["dropout"])
-        cnn_out = sum(C["cnn_channels"])
-        
-        # Projection
-        self.cnn_proj = nn.Sequential(
-            nn.Linear(cnn_out, C["d_model"]),
-            nn.LayerNorm(C["d_model"]), nn.GELU(),
-            nn.Dropout(C["dropout"]),
-        )
-        
-        # Mamba
-        self.mamba = MambaEncoder(C["d_model"], C["d_state"], C["d_conv"],
-                                  C["expand"], C["n_mamba_layers"], C["dropout"])
-        self.attn_pool = nn.Linear(C["d_model"], 1)
-        
-        # SOH head (Gaussian-NLL)
-        self.soh_head = nn.Sequential(
-            nn.Linear(C["d_model"], 128), nn.LayerNorm(128), nn.GELU(),
-            nn.Dropout(C["dropout"]),
-            nn.Linear(128, 64), nn.GELU(),
-            nn.Dropout(C["dropout"]),
-            nn.Linear(64, 2),  # [mean, log_var]
-        )
-        self._init_weights()
+    vif_dict = {}
+    for i, feat in enumerate(FEAT_COLS):
+        vif = variance_inflation_factor(X_with_const, i + 1)
+        vif_dict[feat] = vif
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None: nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+    print("\n  VIF Scores:")
+    for feat in FEAT_COLS:
+        name = FEAT_NAMES.get(feat, feat)
+        status = " OK" if vif_dict[feat] < 5 else "Moderate" if vif_dict[feat] < 10 else "High"
+        print(f"    {name:<30} {vif_dict[feat]:>10.2f}  {status}")
 
-    def encode(self, x):
-        z = self.cnn_proj(self.cnn(x))
-        z = self.mamba(z)
-        attn = F.softmax(self.attn_pool(z), dim=1)
-        return (z * attn).sum(dim=1)
+    return vif_dict
 
-    def forward(self, x):
-        z = self.encode(x)
-        out = self.soh_head(z)
-        mu = torch.sigmoid(out[:, 0])  # SOH ∈ (0,1)
-        log_var = out[:, 1].clamp(-10, 5)
-        return mu, log_var
+# ============================================================
+# FSS CALCULATION
+# ============================================================
 
+def compute_fss(pearson_corr, mi_normalized, max_corr, vif_dict):
+    print("\n" + "=" * 60)
+    print("FSS CALCULATION")
+    print("=" * 60)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4.  Loss (SOH only)
-# ─────────────────────────────────────────────────────────────────────────────
+    w1, w2, w3, w5 = 0.35, 0.30, 0.20, 0.15
 
-def soh_loss(mu, log_var, target, weight=None):
-    """MSE loss for SOH (more stable than NLL)"""
-    mu = torch.clamp(mu, 0.0, 1.0)
-    target = torch.clamp(target, 0.0, 1.0)
-    loss = (mu - target) ** 2
-    if weight is not None:
-        loss = loss * weight
-    return loss.mean()
+    fss_scores = {}
+    gated_features = []
 
+    for feat in FEAT_COLS:
+        leakage = get_target_leakage_score(feat)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5.  Training
-# ─────────────────────────────────────────────────────────────────────────────
+        if leakage >= 0.5:
+            fss_scores[feat] = -np.inf
+            gated_features.append(feat)
+            continue
 
-def cosine_lr(optimizer, epoch, warmup, total_epochs, base_lr):
-    if epoch < warmup:
-        lr = base_lr * (epoch + 1) / warmup
-    else:
-        progress = (epoch - warmup) / max(total_epochs - warmup, 1)
-        lr = base_lr * 0.5 * (1 + math.cos(math.pi * progress))
-    for pg in optimizer.param_groups:
-        pg["lr"] = lr
+        c1 = pearson_corr.get(feat, 0)
+        c2 = 1 - max_corr.get(feat, 1)
+        vif = vif_dict.get(feat, 100)
+        c3 = 1 / (1 + vif)
+        c5 = mi_normalized.get(feat, 0)
 
+        fss = w1 * c1 + w2 * c2 + w3 * c3 + w5 * c5
+        fss_scores[feat] = fss
 
-class EarlyStopping:
-    def __init__(self, patience=20, delta=1e-5):
-        self.patience = patience
-        self.delta = delta
-        self.counter = 0
-        self.best = None
-        self.stop = False
-        self.best_state = None
+    sorted_fss = sorted(fss_scores.items(), key=lambda x: x[1], reverse=True)
 
-    def __call__(self, val_loss, model):
-        if self.best is None or val_loss < self.best - self.delta:
-            self.best = val_loss
-            self.counter = 0
-            self.best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    print("\nWeights:")
+    print(f"  Correlation with SOH: {w1:.2f}")
+    print(f"  Non-Redundancy:        {w2:.2f}")
+    print(f"  Low VIF:               {w3:.2f}")
+    print(f"  Mutual Information:    {w5:.2f}")
+    print(f"\nThreshold: FSS >= {FSS_KEEP_THRESHOLD} -> Keep")
+
+    if gated_features:
+        print(f"\nGated out due to target leakage: {[FEAT_NAMES.get(f, f) for f in gated_features]}")
+
+    print("\nResults:")
+    print("-" * 70)
+    print(f"  {'Rank':<5} {'Feature':<30} {'FSS':>10} {'Leakage':>10} {'Decision':>10}")
+    print("-" * 70)
+
+    for i, (feat, score) in enumerate(sorted_fss):
+        name = FEAT_NAMES.get(feat, feat)
+        leakage = get_target_leakage_score(feat)
+        if leakage >= 0.5:
+            decision = "Remove (leakage)"
+        elif score >= FSS_KEEP_THRESHOLD:
+            decision = "Keep"
         else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.stop = True
+            decision = "Remove"
+        score_str = f"{score:>10.4f}" if np.isfinite(score) else f"{'--':>10}"
+        print(f"  {i+1:<5} {name:<30} {score_str} {leakage:>10.1f} {decision:>16}")
 
-    def restore(self, model):
-        if self.best_state:
-            model.load_state_dict(self.best_state)
+    return fss_scores, sorted_fss
 
+# ============================================================
+# VISUALIZATION
+# ============================================================
 
-def train_soh(model, train_ds, val_ds, cfg):
-    print("\n" + "="*60)
-    print("  TRAINING SOH (fully supervised)")
-    print("="*60)
-    
-    batch = cfg["soh_batch"]
-    train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch, shuffle=False)
-    
-    print(f"  Train: {len(train_ds):,}  |  Val: {len(val_ds):,}")
-    
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg["soh_lr"], weight_decay=cfg["soh_wd"])
-    es = EarlyStopping(patience=cfg["soh_patience"])
-    history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_r2": []}
-    
-    for epoch in range(cfg["soh_epochs"]):
-        cosine_lr(opt, epoch, cfg["warmup_epochs"], cfg["soh_epochs"], cfg["soh_lr"])
-        
-        # Train
-        model.train()
-        train_loss = 0.0
-        for x, y, w in train_loader:
-            x, y, w = x.to(DEVICE), y.to(DEVICE), w.to(DEVICE)
-            opt.zero_grad()
-            mu, log_var = model(x)
-            loss = soh_loss(mu, log_var, y, weight=w)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            train_loss += loss.item()
-        train_loss /= len(train_loader)
-        
-        # Validate
-        model.eval()
-        all_pred, all_true = [], []
-        val_loss = 0.0
-        with torch.no_grad():
-            for x, y, w in val_loader:
-                x, y, w = x.to(DEVICE), y.to(DEVICE), w.to(DEVICE)
-                mu, log_var = model(x)
-                val_loss += soh_loss(mu, log_var, y, weight=w).item()
-                all_pred.extend(mu.cpu().numpy())
-                all_true.extend(y.cpu().numpy())
-        val_loss /= len(val_loader)
-        
-        # Metrics
-        all_pred, all_true = np.array(all_pred), np.array(all_true)
-        mae = mean_absolute_error(all_true, all_pred) * 100  # as percentage
-        r2 = r2_score(all_true, all_pred)
-        
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["val_mae"].append(mae)
-        history["val_r2"].append(r2)
-        
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"  Epoch {epoch+1:3d}/{cfg['soh_epochs']} | "
-                  f"Train: {train_loss:.5f} | Val: {val_loss:.5f} | "
-                  f"MAE: {mae:.4f}% | R²: {r2:.4f}")
-        
-        es(val_loss, model)
-        if es.stop:
-            print(f"  Early stopping at epoch {epoch+1}")
-            break
-    
-    es.restore(model)
-    print(f"\n  Best val loss: {es.best:.6f}")
-    return history
+def create_visualizations(sorted_fss, corr_matrix, output_dir):
+    print("\n" + "=" * 60)
+    print("CREATING VISUALIZATIONS")
+    print("=" * 60)
 
+    plot_items = [(f, s) for f, s in sorted_fss if np.isfinite(s)]
+    gated_items = [(f, s) for f, s in sorted_fss if not np.isfinite(s)]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6.  Evaluation
-# ─────────────────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(12, 8))
 
-def evaluate_soh(model, test_ds, cfg):
-    print("\n" + "="*60)
-    print("  SOH EVALUATION — TEST SET")
-    print("="*60)
-    
-    test_loader = DataLoader(test_ds, batch_size=cfg["soh_batch"], shuffle=False)
-    model.eval()
-    
-    all_mu, all_y, all_lo, all_hi = [], [], [], []
-    
-    with torch.no_grad():
-        for x, y, _ in test_loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            mu, log_var = model(x)
-            sigma = torch.exp(0.5 * log_var)
-            z = 1.645  # 90% CI
-            all_mu.extend(mu.cpu().numpy())
-            all_y.extend(y.cpu().numpy())
-            all_lo.extend((mu - z*sigma).cpu().numpy())
-            all_hi.extend((mu + z*sigma).cpu().numpy())
-    
-    y_true, y_pred = np.array(all_y), np.array(all_mu)
-    y_lo, y_hi = np.array(all_lo), np.array(all_hi)
-    
-    mae = mean_absolute_error(y_true, y_pred) * 100
-    rmse = np.sqrt(np.mean((y_true - y_pred)**2)) * 100
-    r2 = r2_score(y_true, y_pred)
-    picp = np.mean((y_true >= y_lo) & (y_true <= y_hi))
-    pinw = np.mean(y_hi - y_lo) / (y_true.max() - y_true.min() + 1e-8)
-    
-    print(f"\n  MAE  : {mae:.4f}%  (target < 0.70%)")
-    print(f"  RMSE : {rmse:.4f}%")
-    print(f"  R²   : {r2:.5f}  (target > 0.97)")
-    print(f"  PICP : {picp:.4f}  (target ≥ 0.90)")
-    print(f"  PINW : {pinw:.4f}  (lower = better)")
-    
-    # Region-specific MAE
-    print(f"\n  ── MAE by SOH region ────────────────────")
-    for label, mask in [
-        ("SOH < 0.90", y_true < 0.90),
-        ("0.90–0.95", (y_true >= 0.90) & (y_true < 0.95)),
-        ("SOH > 0.95", y_true >= 0.95)
-    ]:
-        if mask.sum() > 0:
-            rm = mean_absolute_error(y_true[mask], y_pred[mask]) * 100
-            print(f"  {label}: MAE = {rm:.4f}%  (n={mask.sum()})")
-    
-    ok = (mae < 0.70) and (r2 > 0.97) and (picp >= 0.90)
-    print(f"\n  {'✓ ALL TARGETS MET' if ok else '✗ targets not fully met'}")
-    
-    return {"mae": mae, "rmse": rmse, "r2": r2, "picp": picp, "pinw": pinw}
+    features = [FEAT_NAMES.get(f, f) for f, _ in plot_items]
+    scores = [s for _, s in plot_items]
+    colors = ["#2ecc71" if s >= FSS_KEEP_THRESHOLD else "#e74c3c" for s in scores]
 
+    ax.barh(range(len(features)), scores, color=colors, alpha=0.7, edgecolor="black")
+    ax.axvline(x=FSS_KEEP_THRESHOLD, color="black", linestyle="--", linewidth=2, label=f"Threshold ({FSS_KEEP_THRESHOLD})")
+    ax.set_yticks(range(len(features)))
+    ax.set_yticklabels(features)
+    ax.set_xlabel("FSS Score", fontsize=12)
+    title = "Feature Selection Score (FSS) Ranking"
+    if gated_items:
+        title += f"\n(excludes {len(gated_items)} feature(s) removed for target leakage)"
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="x")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7.  Main
-# ─────────────────────────────────────────────────────────────────────────────
+    plt.tight_layout()
+    plt.savefig(output_dir / "fss_ranking.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("   Saved: fss_ranking.png")
 
-def print_model_summary(model, cfg):
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\n  Model parameters: {total:,} total | {trainable:,} trainable")
-    print(f"  Input shape: ({cfg['window_size']}, {cfg['input_dim']})")
-    print(f"  CNN output dim: {sum(cfg['cnn_channels'])}")
-    print(f"  d_model: {cfg['d_model']}  | Mamba layers: {cfg['n_mamba_layers']}")
+    fig, ax = plt.subplots(figsize=(14, 12))
 
+    if "soh" in corr_matrix.columns:
+        soh_corr = corr_matrix["soh"].drop("soh").sort_values(ascending=False)
+        sorted_cols = list(soh_corr.index) + ["soh"]
+        corr_matrix = corr_matrix.loc[sorted_cols, sorted_cols]
+
+    mask = np.zeros_like(corr_matrix, dtype=bool)
+    mask[np.triu_indices_from(mask)] = True
+
+    sns.heatmap(
+        corr_matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="RdBu_r",
+        center=0,
+        square=True,
+        cbar_kws={"label": "Correlation"},
+        ax=ax,
+        mask=mask,
+    )
+    ax.set_title("Feature Correlation Matrix", fontsize=14, fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "correlation_matrix.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print("   Saved: correlation_matrix.png")
+
+# ============================================================
+# EXPORT RESULTS
+# ============================================================
+
+def export_results(pearson_corr, mi_normalized, max_corr, vif_dict, fss_scores, output_dir):
+    print("\n" + "=" * 60)
+    print("EXPORTING RESULTS")
+    print("=" * 60)
+
+    df_results = pd.DataFrame(
+        {
+            "Feature": FEAT_COLS,
+            "Feature_Name": [FEAT_NAMES.get(f, f) for f in FEAT_COLS],
+            "Pearson_Correlation": [pearson_corr.get(f, 0) for f in FEAT_COLS],
+            "Mutual_Information": [mi_normalized.get(f, 0) for f in FEAT_COLS],
+            "Max_Correlation": [max_corr.get(f, 1) for f in FEAT_COLS],
+            "VIF": [vif_dict.get(f, 100) for f in FEAT_COLS],
+            "Target_Leakage": [get_target_leakage_score(f) for f in FEAT_COLS],
+            "FSS_Score": [fss_scores.get(f, 0) for f in FEAT_COLS],
+        }
+    )
+
+    def decide(row):
+        if row["Target_Leakage"] >= 0.5:
+            return "Remove (leakage)"
+        return "Keep" if row["FSS_Score"] >= FSS_KEEP_THRESHOLD else "Remove"
+
+    df_results["Decision"] = df_results.apply(decide, axis=1)
+    df_results = df_results.sort_values("FSS_Score", ascending=False)
+
+    df_results.to_csv(output_dir / "feature_selection_results.csv", index=False)
+    print("   Saved: feature_selection_results.csv")
+
+    fss_df = df_results[["Feature_Name", "FSS_Score", "Target_Leakage", "Decision"]]
+    fss_df.to_csv(output_dir / "fss_ranking.csv", index=False)
+    print("   Saved: fss_ranking.csv")
+
+    print("\nSummary:")
+    print("-" * 50)
+    keep_count = (df_results["Decision"] == "Keep").sum()
+    leak_count = (df_results["Decision"] == "Remove (leakage)").sum()
+    other_remove_count = (df_results["Decision"] == "Remove").sum()
+    print(f"  Features Kept: {keep_count}")
+    print(f"  Features Removed (leakage): {leak_count}")
+    print(f"  Features Removed (other): {other_remove_count}")
+    print(f"  Total Features: {len(FEAT_COLS)}")
+
+    print("\nFinal Selected Features:")
+    for _, row in df_results[df_results["Decision"] == "Keep"].iterrows():
+        print(f"   {row['Feature_Name']}: FSS = {row['FSS_Score']:.4f}")
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("=" * 60)
+    print("FEATURE IMPORTANCE ANALYSIS")
+    print("=" * 60)
+
+    df = load_data()
+
+    train_df, test_df = split_cells(df)
+
+    pearson_corr = compute_correlation_soh(train_df)
+    mi_normalized = compute_mutual_information(train_df)
+    max_corr, corr_matrix = compute_redundancy(train_df)
+    vif_dict = compute_vif(train_df)
+
+    fss_scores, sorted_fss = compute_fss(pearson_corr, mi_normalized, max_corr, vif_dict)
+
+    create_visualizations(sorted_fss, corr_matrix, OUTPUT_DIR)
+
+    export_results(pearson_corr, mi_normalized, max_corr, vif_dict, fss_scores, OUTPUT_DIR)
+
+    print("\n" + "=" * 60)
+    print("FEATURE IMPORTANCE COMPLETE")
+    print("=" * 60)
+    print(f"\nResults saved to: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
-    print("="*60)
-    print("  TRAINING SOH-ONLY MODEL")
-    print("="*60)
-    print(f"Device: {DEVICE}")
-    
-    # Load data
-    print("\nLoading SOH data...")
-    soh_df, scaler = load_soh_data(CFG["soh_path"])
-    print(f"  SOH: {soh_df.shape}")
-    print(f"  Cells: {soh_df['barcode'].nunique()}")
-    
-    # Build datasets
-    W = CFG["window_size"]
-    train_ds = SequenceDataset(soh_df, W, CFG["soh_stride"], "train",
-                               weighted=True, tail_weight=CFG["tail_weight"])
-    val_ds = SequenceDataset(soh_df, W, CFG["soh_stride"], "val",
-                             weighted=True, tail_weight=CFG["tail_weight"])
-    test_ds = SequenceDataset(soh_df, W, CFG["soh_stride"], "test")
-    
-    print(f"  Train sequences: {len(train_ds):,}")
-    print(f"  Val sequences:   {len(val_ds):,}")
-    print(f"  Test sequences:  {len(test_ds):,}")
-    
-    # Build model
-    print("\nBuilding CNN-Mamba-UQ model (SOH only)...")
-    model = CNNMambaSOH(CFG).to(DEVICE)
-    print_model_summary(model, CFG)
-    
-    # Train
-    history = train_soh(model, train_ds, val_ds, CFG)
-    
-    # Evaluate
-    results = evaluate_soh(model, test_ds, CFG)
-    
-    # Save model
-    os.makedirs(os.path.dirname(CFG["save_path"]), exist_ok=True)
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "cfg": CFG,
-        "feat_cols": FEAT_COLS,
-        "scaler_mean": scaler.mean_.tolist(),
-        "scaler_std": scaler.scale_.tolist(),
-        "results": results,
-        "history": history
-    }, CFG["save_path"])
-    print(f"\n  Model saved → {CFG['save_path']}")
-    
-    # Final summary
-    print("\n" + "="*60)
-    print("  FINAL RESULTS SUMMARY")
-    print("="*60)
-    print(f"  SOH  MAE: {results['mae']:.4f}%  "
-          f"R²: {results['r2']:.5f}  "
-          f"PICP: {results['picp']:.4f}  "
-          f"PINW: {results['pinw']:.4f}")
-    print("="*60)
+    main()
