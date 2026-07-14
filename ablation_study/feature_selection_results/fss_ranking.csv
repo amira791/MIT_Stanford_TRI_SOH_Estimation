@@ -1,0 +1,17 @@
+Feature_Name,FSS_Score,Target_Leakage,Decision
+CE (t-2),0.571982000320326,0.0,Keep
+CE (t-1),0.5714760807624403,0.0,Keep
+Relative Capacity,0.5094785972378306,0.0,Keep
+Timestamp,0.47380371519941783,0.0,Remove
+Internal Resistance,0.45695773592270506,0.0,Remove
+Cycle Index,0.4454040411751455,0.0,Remove
+Relative Resistance,0.44509117498254186,0.0,Remove
+Relative Energy,0.43260988178380605,0.0,Remove
+Charge Capacity,0.4210921348689611,0.0,Remove
+Cycle Position,0.41672549699711386,0.0,Remove
+Charge Energy,0.3941688148879504,0.0,Remove
+Max Temperature,0.2536498556193976,0.0,Remove
+Average Temperature,0.24291060988315477,0.0,Remove
+Min Temperature,0.167201365892115,0.0,Remove
+Discharge Capacity,-inf,1.0,Remove (leakage)
+Discharge Energy,-inf,0.8,Remove (leakage)
