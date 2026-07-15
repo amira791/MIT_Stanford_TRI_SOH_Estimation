@@ -1,4 +1,10 @@
-# train_soh_only.py - SOH ONLY (extracted from your full code)
+# train_soh_top3.py - SOH ONLY with TOP 3 FEATURES
+"""
+Training script using ONLY the top 3 features from FSS analysis:
+1. coulombic_efficiency_lagged_1
+2. coulombic_efficiency_lagged_2
+3. cap_rel
+"""
 
 import os, math, warnings
 import numpy as np
@@ -20,15 +26,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1.  Config - SOH ONLY
+# 1.  Config - SOH ONLY with TOP 3 FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
 CFG = dict(
     # Paths
     soh_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\soh_best.pt",
+    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\soh_top3_best.pt",
     
-    # Features
-    input_dim = 10,
+    # Features - TOP 3 from FSS analysis
+    input_dim = 3,  # Changed from 10 to 3
     window_size = 50,
     soh_stride = 2,
     
@@ -53,7 +59,7 @@ CFG = dict(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.  Data loading & preprocessing (SOH only)
+# 2.  Data loading & preprocessing (SOH only) - TOP 3 FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,14 +89,12 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     df["cycle_pos"] = pd.concat(cycle_pos_list)
     return df
 
-
+# TOP 3 FEATURES from FSS analysis
 FEAT_COLS = [
-    "dc_internal_resistance", "temperature_avg",
-    "charge_capacity", "charge_energy",
-    "coulombic_efficiency_lagged_1", "coulombic_efficiency_lagged_2",
-    "cap_rel", "energy_rel", "ir_rel", "cycle_pos",
+    "coulombic_efficiency_lagged_1",  # Rank 2
+    "coulombic_efficiency_lagged_2",  # Rank 1
+    "cap_rel",                        # Rank 3
 ]
-
 
 def load_soh_data(soh_path):
     """Load and preprocess SOH data only"""
@@ -139,7 +143,7 @@ class SequenceDataset(Dataset):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  Model (SOH head only)
+# 3.  Model (SOH head only) - MODIFIED FOR TOP 3 FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MultiScaleCNN(nn.Module):
@@ -338,7 +342,7 @@ class EarlyStopping:
 
 def train_soh(model, train_ds, val_ds, cfg):
     print("\n" + "="*60)
-    print("  TRAINING SOH (fully supervised)")
+    print("  TRAINING SOH (TOP 3 FEATURES)")
     print("="*60)
     
     batch = cfg["soh_batch"]
@@ -412,7 +416,7 @@ def train_soh(model, train_ds, val_ds, cfg):
 
 def evaluate_soh(model, test_ds, cfg):
     print("\n" + "="*60)
-    print("  SOH EVALUATION — TEST SET")
+    print("  SOH EVALUATION — TEST SET (TOP 3 FEATURES)")
     print("="*60)
     
     test_loader = DataLoader(test_ds, batch_size=cfg["soh_batch"], shuffle=False)
@@ -478,9 +482,13 @@ def print_model_summary(model, cfg):
 
 if __name__ == "__main__":
     print("="*60)
-    print("  TRAINING SOH-ONLY MODEL")
+    print("  TRAINING SOH-ONLY MODEL (TOP 3 FEATURES)")
     print("="*60)
     print(f"Device: {DEVICE}")
+    print("\nFeatures used:")
+    for f in FEAT_COLS:
+        print(f"  - {f}")
+    print("="*60)
     
     # Load data
     print("\nLoading SOH data...")
@@ -526,7 +534,7 @@ if __name__ == "__main__":
     
     # Final summary
     print("\n" + "="*60)
-    print("  FINAL RESULTS SUMMARY")
+    print("  FINAL RESULTS SUMMARY (TOP 3 FEATURES)")
     print("="*60)
     print(f"  SOH  MAE: {results['mae']:.4f}%  "
           f"R²: {results['r2']:.5f}  "
