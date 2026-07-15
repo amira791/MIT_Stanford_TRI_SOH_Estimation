@@ -1,0 +1,24 @@
+======================================================================
+DATASET VALIDATION REPORT
+======================================================================
+
+Total rows: 113,896
+Total columns: 25
+Unique cells: 134
+
+Split Distribution:
+  train: 78,741 rows (69.1%), 93 cells
+  val: 10,918 rows (9.6%), 13 cells
+  test: 24,237 rows (21.3%), 28 cells
+
+Top 10 Feature Correlations with SOH:
+  1. cap_rel: 0.9990
+  2. discharge_capacity: 0.9685
+  3. charge_capacity: 0.9672
+  4. energy_rel: 0.9345
+  5. discharge_energy: 0.9300
+  6. charge_energy: 0.8947
+  7. cycle_pos: 0.8196
+  8. cycle_norm: 0.8196
+  9. ir_rel: 0.7582
+  10. dc_ir_norm: 0.7559
