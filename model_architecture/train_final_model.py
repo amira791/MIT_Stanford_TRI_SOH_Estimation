@@ -78,9 +78,12 @@ CFG = dict(
     warmup_epochs = 10,          # LR warmup (cosine schedule)
 
     # Evidential-specific
-    nig_mse_warmup_epochs = 15,  # epochs of plain MSE-on-gamma before NIG-NLL kicks in
+    nig_mse_warmup_epochs = 10,  # epochs of MSE-ONLY before the full evidential loss kicks in
     evid_lambda   = 0.01,        # evidence regularizer weight (Amini et al. eq. 9)
-    evid_lambda_max = 0.05,      # anneal target (avoids "evidence collapse")
+    evid_lambda_max = 0.05,      # anneal target (avoids over-inflated evidence)
+    evid_mse_weight = 1.0,       # PERMANENT MSE anchor weight inside evidential_loss
+                                  # (fixes the "gradient shrinkage" instability - see
+                                  # comments in evidential_loss(); do not set to 0)
 
     # Deployment-metric measurement
     latency_batch_sizes = [1, 32, 256],
@@ -346,10 +349,18 @@ class EvidentialHead(nn.Module):
 
     def forward(self, z):
         out = self.net(z)
-        gamma = torch.sigmoid(out[:, 0])                      # SOH mean, in (0,1)
-        nu    = F.softplus(out[:, 1]) + 1e-6                   # > 0
-        alpha = F.softplus(out[:, 2]) + 1.0 + 1e-6              # > 1 (required for finite variance)
-        beta  = F.softplus(out[:, 3]) + 1e-6                   # > 0
+        gamma = torch.sigmoid(out[:, 0])                       # SOH mean, in (0,1)
+        # NOTE: nu and alpha are clamped to a bounded range. The raw NIG-NLL
+        # (Amini et al. 2020) is unbounded below as nu -> inf ("gradient
+        # shrinkage problem", Oh & Shin, AAAI 2022 / MT-ENet), which lets the
+        # network minimize loss by inflating "evidence" without improving
+        # accuracy - this is what caused the loss to plunge negative while
+        # MAE stopped improving. Clamping bounds how much evidence-inflation
+        # can contribute, and works together with the permanent MSE anchor
+        # term added in evidential_loss() below.
+        nu    = F.softplus(out[:, 1]).clamp(max=50.0) + 1e-6    # > 0, bounded
+        alpha = F.softplus(out[:, 2]).clamp(max=50.0) + 1.0 + 1e-6  # > 1, bounded
+        beta  = F.softplus(out[:, 3]) + 1e-6                    # > 0
         return gamma, nu, alpha, beta
 
 
@@ -464,8 +475,24 @@ def evidential_regularizer(gamma, nu, alpha, y):
     return error * evidence
 
 
-def evidential_loss(gamma, nu, alpha, beta, y, weight=None, lam=0.01):
-    loss = nig_nll(gamma, nu, alpha, beta, y) + lam * evidential_regularizer(gamma, nu, alpha, y)
+def evidential_loss(gamma, nu, alpha, beta, y, weight=None, lam=0.01, mse_weight=1.0):
+    """NIG-NLL + evidence regularizer + a PERMANENT MSE anchor term.
+
+    The MSE anchor is not optional stabilization scaffolding - it's the
+    fix recommended in the follow-up literature (MT-ENet, Oh & Shin 2022;
+    see also arXiv:2404.17126 which independently found the same
+    instability and added an MSE term for the same reason) for the
+    documented gradient-shrinkage / evidence-inflation failure mode of the
+    raw NIG-NLL. Unlike the old warmup-then-switch scheme, this term stays
+    active for the whole of training, so gamma keeps receiving a direct,
+    well-scaled accuracy gradient regardless of what nu/alpha are doing.
+    """
+    y_c = torch.clamp(y, 0.0, 1.0)
+    gamma_c = torch.clamp(gamma, 0.0, 1.0)
+    mse = (gamma_c - y_c) ** 2
+    loss = nig_nll(gamma, nu, alpha, beta, y) \
+        + lam * evidential_regularizer(gamma, nu, alpha, y) \
+        + mse_weight * mse
     if weight is not None:
         loss = loss * weight
     return loss.mean()
@@ -526,7 +553,8 @@ def forward_and_loss(model, x, y, w, cfg, epoch):
             prog = min(1.0, (epoch - cfg["nig_mse_warmup_epochs"]) /
                        max(1, cfg["soh_epochs"] - cfg["nig_mse_warmup_epochs"]))
             lam = cfg["evid_lambda"] + prog * (cfg["evid_lambda_max"] - cfg["evid_lambda"])
-            loss = evidential_loss(gamma, nu, alpha, beta, y, weight=w, lam=lam)
+            loss = evidential_loss(gamma, nu, alpha, beta, y, weight=w, lam=lam,
+                                    mse_weight=cfg["evid_mse_weight"])
         point_pred = gamma
     else:
         mu, log_var = out
@@ -592,9 +620,20 @@ def train_soh(model, train_ds, val_ds, cfg):
         history["val_r2"].append(r2)
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
+            evid_note = ""
+            if cfg["evidential"]:
+                # Diagnostic: mean "evidence" (2*nu + alpha) on the last val
+                # batch. If this keeps climbing while MAE stalls/worsens,
+                # that's the evidence-inflation failure mode - stop and
+                # check evid_lambda / evid_mse_weight before continuing.
+                with torch.no_grad():
+                    xb, yb, wb = next(iter(val_loader))
+                    (g, nu_b, a_b, _), _ = model(xb.to(DEVICE))
+                    mean_evidence = (2 * nu_b + a_b).mean().item()
+                evid_note = f" | mean_evidence: {mean_evidence:.2f}"
             print(f"  Epoch {epoch + 1:3d}/{cfg['soh_epochs']} | "
                   f"Train: {train_loss:.5f} | Val: {val_loss:.5f} | "
-                  f"MAE: {mae:.4f}% | R2: {r2:.4f}")
+                  f"MAE: {mae:.4f}% | R2: {r2:.4f}{evid_note}")
 
         es(val_loss, model)
         if es.stop:
