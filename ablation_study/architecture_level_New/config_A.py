@@ -1,24 +1,15 @@
-# train_soh_bem.py
-# BEM-SOH : Bidirectional Evidential Mamba network for calibrated
-#           State-of-Health (SOH) estimation with decomposed
-#           (aleatoric + epistemic) uncertainty quantification.
+# config_A.py
+# Configuration A: Baseline (Causal + Gaussian)
+# 
+# Purpose: Literature-typical setup — causal Mamba encoder with Gaussian-NLL head
+# This serves as the baseline for all comparisons.
 #
-# Novelty framing (see accompanying discussion): this is a COMBINATORIAL /
-# APPLICATION contribution, not a new algorithm. Every individual component
-# (Multi-scale CNN, selective-SSM/Mamba, deep evidential regression,
-# isotonic calibration) is prior art, correctly cited in comments below.
-# What is new is: (a) applying single-pass evidential UQ (Amini et al. 2020)
-# to a Mamba-based battery SOH model, closing the "no epistemic/aleatoric
-# separation" + "no calibration" gaps you documented in your review, and
-# (b) making the SSM encoder bidirectional, closing the "causal-only /
-# no backward context" gap you documented for SambaMixer.
-#
-# References embedded as comments at point of use:
-#   - Mamba / S6 selective SSM: Gu & Dao, 2023 (arXiv:2312.00752)
-#   - Deep Evidential Regression (NIG head + loss): Amini et al., NeurIPS 2020
-#     (arXiv:1910.02600)
-#   - Calibrated regression via isotonic recalibration: Kuleshov et al., 2018
-#     (arXiv:1807.00263)
+# Architecture:
+#   - CNN Backbone: Multi-scale (3 branches: 32, 64, 128 channels)
+#   - Pooling: Attention pooling (learned weights)
+#   - Encoder: Causal (forward-only) Mamba x3 layers
+#   - UQ Head: Gaussian-NLL (mu, log_var)
+#   - Calibration: None
 
 import os, math, time, warnings, json
 import numpy as np
@@ -32,12 +23,11 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 warnings.filterwarnings("ignore")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.  Config
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ~> Amira Comments
-
-
-# ~> set a random seed for reproducibility (for random weight init, dropout, etc.) -> making experiments reaptable on the same machine
-
+# Set random seed for reproducibility
 SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -46,13 +36,10 @@ torch.cuda.manual_seed_all(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1.  Config
-# ─────────────────────────────────────────────────────────────────────────────
 CFG = dict(
     # Paths
     soh_path  = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\bem_soh_best.pt",
+    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\config_A_baseline.pt",
 
     # Features
     input_dim  = 10,
@@ -69,10 +56,11 @@ CFG = dict(
     n_mamba_layers = 3,
     dropout      = 0.15,
 
-    # --- ARCHITECTURE SWITCHES (use these for the ablation table) ---
-    bidirectional = True,   # False -> reproduces old causal-only encoder
-    evidential    = True,   # False -> reproduces old Gaussian-NLL / MSE head
-    calibrate     = True,   # apply post-hoc isotonic calibration on val set
+    # ─── ARCHITECTURE SWITCHES ───
+    # CONFIG A: Causal + Gaussian (Baseline)
+    bidirectional = False,   # ← CAUSAL (forward-only)
+    evidential    = False,   # ← GAUSSIAN-NLL head
+    calibrate     = False,   # ← NO calibration
 
     # Training
     soh_epochs   = 120,
@@ -81,15 +69,13 @@ CFG = dict(
     soh_wd       = 1e-4,
     soh_patience = 25,
     tail_weight  = 3.0,
-    warmup_epochs = 10,          # LR warmup (cosine schedule)
+    warmup_epochs = 10,
 
-    # Evidential-specific
-    nig_mse_warmup_epochs = 10,  # epochs of MSE-ONLY before the full evidential loss kicks in
-    evid_lambda   = 0.01,        # evidence regularizer weight (Amini et al. eq. 9)
-    evid_lambda_max = 0.05,      # anneal target (avoids over-inflated evidence)
-    evid_mse_weight = 1.0,       # PERMANENT MSE anchor weight inside evidential_loss
-                                  # (fixes the "gradient shrinkage" instability - see
-                                  # comments in evidential_loss(); do not set to 0)
+    # Evidential-specific (not used, but keep for compatibility)
+    nig_mse_warmup_epochs = 10,
+    evid_lambda   = 0.01,
+    evid_lambda_max = 0.05,
+    evid_mse_weight = 1.0,
 
     # Deployment-metric measurement
     latency_batch_sizes = [1, 32, 256],
@@ -101,8 +87,7 @@ CFG = dict(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add per-cell relative features (unchanged from baseline - already
-    ablated and justified in prior feature-selection study)."""
+    """Add per-cell relative features."""
     df = df.copy()
     cap_rel_list, en_rel_list, ir_rel_list, cycle_pos_list = [], [], [], []
 
@@ -149,8 +134,7 @@ def load_soh_data(soh_path):
 
 
 class SequenceDataset(Dataset):
-    """Sliding-window dataset for SOH. Split MUST be done by cell_id
-    upstream (confirmed in soh_full.csv 'split' column) to avoid leakage."""
+    """Sliding-window dataset for SOH."""
     def __init__(self, df, window_size, stride=1, split=None,
                  weighted=False, tail_thr=0.90, tail_weight=1.0):
         self.samples = []
@@ -185,11 +169,10 @@ class SequenceDataset(Dataset):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  Model
+# 3.  Model (SAME as original, just with config switches)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MultiScaleCNN(nn.Module):
-    """Unchanged from baseline - already ablated (single vs multi-scale)."""
     def __init__(self, input_dim, channels, kernels, dropout=0.1):
         super().__init__()
         self.branches = nn.ModuleList()
@@ -212,9 +195,6 @@ class MultiScaleCNN(nn.Module):
 
 
 class MambaBlock(nn.Module):
-    """Selective SSM block (S6), hand-rolled sequential-scan implementation.
-    Reference: Gu & Dao, "Mamba: Linear-Time Sequence Modeling with
-    Selective State Spaces", arXiv:2312.00752."""
     def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout=0.1):
         super().__init__()
         self.d_model = d_model
@@ -265,8 +245,6 @@ class MambaBlock(nn.Module):
 
 
 class MambaEncoder(nn.Module):
-    """Causal (forward-only) stack. Kept standalone so bidirectional=False
-    exactly reproduces the original baseline for ablation purposes."""
     def __init__(self, d_model, d_state, d_conv, expand, n_layers, dropout):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -282,16 +260,6 @@ class MambaEncoder(nn.Module):
 
 
 class BiMambaEncoder(nn.Module):
-    """Bidirectional selective-SSM encoder.
-
-    Motivation (closes a gap named explicitly in your own review, Table 12):
-    SambaMixer and other Mamba-based SOH/RUL models are causal-only ("no
-    backward context"). At inference we already hold the *entire* window
-    (it is not a streaming/online setting), so restricting the recurrence
-    to one direction discards information for free. We run two independent
-    MambaEncoder stacks (forward, and on the time-reversed sequence), then
-    fuse with a learned projection - same idea as BiLSTM, applied to S6.
-    """
     def __init__(self, d_model, d_state, d_conv, expand, n_layers, dropout):
         super().__init__()
         self.fwd = MambaEncoder(d_model, d_state, d_conv, expand, n_layers, dropout)
@@ -310,10 +278,6 @@ class BiMambaEncoder(nn.Module):
 
 
 class GaussianHead(nn.Module):
-    """Baseline UQ head kept for ablation (evidential=False).
-    NOTE: only meaningful if trained with the FIXED gaussian_nll_loss below -
-    the original script's bug (log_var unused in the loss) is NOT reproduced
-    here on purpose."""
     def __init__(self, d_model, dropout=0.15):
         super().__init__()
         self.net = nn.Sequential(
@@ -332,17 +296,6 @@ class GaussianHead(nn.Module):
 
 
 class EvidentialHead(nn.Module):
-    """Deep Evidential Regression head.
-    Reference: Amini, Schwarting, Soleimany, Rus, "Deep Evidential
-    Regression", NeurIPS 2020 (arXiv:1910.02600).
-
-    Predicts the 4 parameters (gamma, nu, alpha, beta) of a Normal-Inverse-
-    Gamma distribution placed over (mean, variance) of the target. This
-    gives, in ONE forward pass (no MC-dropout sampling, no ensembles):
-      - point estimate      : gamma
-      - aleatoric variance  : beta / (alpha - 1)         (irreducible, data noise)
-      - epistemic variance  : beta / (nu * (alpha - 1))  (reducible, model's own doubt)
-    """
     def __init__(self, d_model, dropout=0.15):
         super().__init__()
         self.net = nn.Sequential(
@@ -355,32 +308,14 @@ class EvidentialHead(nn.Module):
 
     def forward(self, z):
         out = self.net(z)
-        gamma = torch.sigmoid(out[:, 0])                       # SOH mean, in (0,1)
-        # NOTE: nu and alpha are clamped to a bounded range. The raw NIG-NLL
-        # (Amini et al. 2020) is unbounded below as nu -> inf ("gradient
-        # shrinkage problem", Oh & Shin, AAAI 2022 / MT-ENet), which lets the
-        # network minimize loss by inflating "evidence" without improving
-        # accuracy - this is what caused the loss to plunge negative while
-        # MAE stopped improving. Clamping bounds how much evidence-inflation
-        # can contribute, and works together with the permanent MSE anchor
-        # term added in evidential_loss() below.
-        nu    = F.softplus(out[:, 1]).clamp(max=50.0) + 1e-6    # > 0, bounded
-        alpha = F.softplus(out[:, 2]).clamp(max=50.0) + 1.0 + 1e-6  # > 1, bounded
-        beta  = F.softplus(out[:, 3]) + 1e-6                    # > 0
+        gamma = torch.sigmoid(out[:, 0])
+        nu    = F.softplus(out[:, 1]).clamp(max=50.0) + 1e-6
+        alpha = F.softplus(out[:, 2]).clamp(max=50.0) + 1.0 + 1e-6
+        beta  = F.softplus(out[:, 3]) + 1e-6
         return gamma, nu, alpha, beta
 
 
 class BEM_SOH(nn.Module):
-    """Bidirectional Evidential Mamba for SOH estimation.
-
-    Pipeline: MultiScaleCNN -> proj -> {MambaEncoder | BiMambaEncoder}
-              -> attention pool -> {GaussianHead | EvidentialHead}
-
-    CFG['bidirectional'] and CFG['evidential'] toggle each design change
-    independently, so the SAME class produces all 4 ablation cells
-    (causal+gaussian == old baseline, ..., bidirectional+evidential == full
-    proposed model) with identical code paths elsewhere -> a fair ablation.
-    """
     def __init__(self, cfg):
         super().__init__()
         C = cfg
@@ -425,7 +360,7 @@ class BEM_SOH(nn.Module):
         z = self.cnn_proj(self.cnn(x))
         z = self.encoder(z)
         attn = F.softmax(self.attn_pool(z), dim=1)
-        return (z * attn).sum(dim=1), attn  # return attn for interpretability plots
+        return (z * attn).sum(dim=1), attn
 
     def forward(self, x):
         z, attn = self.encode(x)
@@ -437,8 +372,6 @@ class BEM_SOH(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def mse_warmup_loss(pred_mean, target, weight=None):
-    """Plain MSE, used to warm-start BOTH head types before the
-    distributional loss kicks in (stabilizes early training)."""
     pred_mean = torch.clamp(pred_mean, 0.0, 1.0)
     target = torch.clamp(target, 0.0, 1.0)
     loss = (pred_mean - target) ** 2
@@ -448,8 +381,6 @@ def mse_warmup_loss(pred_mean, target, weight=None):
 
 
 def gaussian_nll_loss(mu, log_var, target, weight=None):
-    """FIXED Gaussian-NLL (baseline ablation arm). Unlike the original
-    script, log_var actually participates in the loss -> receives gradient."""
     mu = torch.clamp(mu, 0.0, 1.0)
     target = torch.clamp(target, 0.0, 1.0)
     var = torch.exp(log_var)
@@ -460,8 +391,6 @@ def gaussian_nll_loss(mu, log_var, target, weight=None):
 
 
 def nig_nll(gamma, nu, alpha, beta, y):
-    """Normal-Inverse-Gamma negative log-likelihood.
-    Amini et al. 2020, Eq. 8."""
     two_b_lambda = 2 * beta * (1 + nu)
     nll = 0.5 * torch.log(math.pi / nu) \
         - alpha * torch.log(two_b_lambda) \
@@ -471,28 +400,12 @@ def nig_nll(gamma, nu, alpha, beta, y):
 
 
 def evidential_regularizer(gamma, nu, alpha, y):
-    """Amini et al. 2020, Eq. 9. Penalizes high "evidence" (2*nu + alpha)
-    on samples where the point prediction is wrong - this is what prevents
-    the network from just inflating nu to trivially shrink the NLL without
-    actually improving accuracy (the same failure mode we found in the
-    original Gaussian-NLL head, just for evidential models)."""
     error = torch.abs(y - gamma)
     evidence = 2 * nu + alpha
     return error * evidence
 
 
 def evidential_loss(gamma, nu, alpha, beta, y, weight=None, lam=0.01, mse_weight=1.0):
-    """NIG-NLL + evidence regularizer + a PERMANENT MSE anchor term.
-
-    The MSE anchor is not optional stabilization scaffolding - it's the
-    fix recommended in the follow-up literature (MT-ENet, Oh & Shin 2022;
-    see also arXiv:2404.17126 which independently found the same
-    instability and added an MSE term for the same reason) for the
-    documented gradient-shrinkage / evidence-inflation failure mode of the
-    raw NIG-NLL. Unlike the old warmup-then-switch scheme, this term stays
-    active for the whole of training, so gamma keeps receiving a direct,
-    well-scaled accuracy gradient regardless of what nu/alpha are doing.
-    """
     y_c = torch.clamp(y, 0.0, 1.0)
     gamma_c = torch.clamp(gamma, 0.0, 1.0)
     mse = (gamma_c - y_c) ** 2
@@ -544,9 +457,6 @@ class EarlyStopping:
 
 
 def forward_and_loss(model, x, y, w, cfg, epoch):
-    """Single place that dispatches to the right loss depending on the
-    architecture switches AND the current training phase (MSE warmup vs
-    distributional loss)."""
     (out, attn) = model(x)
     evidential = cfg["evidential"]
 
@@ -555,7 +465,6 @@ def forward_and_loss(model, x, y, w, cfg, epoch):
         if epoch < cfg["nig_mse_warmup_epochs"]:
             loss = mse_warmup_loss(gamma, y, weight=w)
         else:
-            # linearly anneal lambda so evidence regularization ramps in gently
             prog = min(1.0, (epoch - cfg["nig_mse_warmup_epochs"]) /
                        max(1, cfg["soh_epochs"] - cfg["nig_mse_warmup_epochs"]))
             lam = cfg["evid_lambda"] + prog * (cfg["evid_lambda_max"] - cfg["evid_lambda"])
@@ -575,8 +484,7 @@ def forward_and_loss(model, x, y, w, cfg, epoch):
 
 def train_soh(model, train_ds, val_ds, cfg):
     print("\n" + "=" * 60)
-    print(f"  TRAINING BEM-SOH  (bidirectional={cfg['bidirectional']}, "
-          f"evidential={cfg['evidential']})")
+    print(f"  TRAINING CONFIG A: Causal + Gaussian (Baseline)")
     print("=" * 60)
 
     batch = cfg["soh_batch"]
@@ -626,20 +534,9 @@ def train_soh(model, train_ds, val_ds, cfg):
         history["val_r2"].append(r2)
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            evid_note = ""
-            if cfg["evidential"]:
-                # Diagnostic: mean "evidence" (2*nu + alpha) on the last val
-                # batch. If this keeps climbing while MAE stalls/worsens,
-                # that's the evidence-inflation failure mode - stop and
-                # check evid_lambda / evid_mse_weight before continuing.
-                with torch.no_grad():
-                    xb, yb, wb = next(iter(val_loader))
-                    (g, nu_b, a_b, _), _ = model(xb.to(DEVICE))
-                    mean_evidence = (2 * nu_b + a_b).mean().item()
-                evid_note = f" | mean_evidence: {mean_evidence:.2f}"
             print(f"  Epoch {epoch + 1:3d}/{cfg['soh_epochs']} | "
                   f"Train: {train_loss:.5f} | Val: {val_loss:.5f} | "
-                  f"MAE: {mae:.4f}% | R2: {r2:.4f}{evid_note}")
+                  f"MAE: {mae:.4f}% | R2: {r2:.4f}")
 
         es(val_loss, model)
         if es.stop:
@@ -652,13 +549,11 @@ def train_soh(model, train_ds, val_ds, cfg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.  Uncertainty extraction + calibration
+# 6.  Evaluation
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def get_predictions(model, loader, cfg):
-    """Returns point pred, total sigma, and (if evidential) the
-    aleatoric/epistemic decomposition."""
     model.eval()
     all_y, all_mu, all_sigma = [], [], []
     all_aleatoric, all_epistemic = [], []
@@ -690,10 +585,6 @@ def get_predictions(model, loader, cfg):
 
 
 def fit_isotonic_calibrator(y_true, mu, sigma, n_q=20):
-    """Post-hoc recalibration of predicted quantiles to empirical coverage.
-    Reference: Kuleshov, Fenner, Ermon, "Accurate Uncertainties for Deep
-    Learning Using Calibrated Regression", ICML 2018 (arXiv:1807.00263).
-    Fit on the VALIDATION set only, applied to test at eval time."""
     from scipy.stats import norm
     quantiles = np.linspace(0.05, 0.95, n_q)
     empirical = []
@@ -707,12 +598,8 @@ def fit_isotonic_calibrator(y_true, mu, sigma, n_q=20):
 
 
 def calibrated_interval(mu, sigma, iso_calibrator, conf=0.90):
-    """Uses the fitted isotonic map to find the z-multiplier that actually
-    yields `conf` empirical coverage, instead of trusting the raw Gaussian
-    z=1.645 assumption blindly."""
     from scipy.stats import norm
     target_q_lo, target_q_hi = (1 - conf) / 2, 1 - (1 - conf) / 2
-    # invert the calibrator: find nominal quantile that MAPS to target coverage
     grid = np.linspace(0.001, 0.999, 400)
     mapped = iso_calibrator.predict(grid)
     q_lo = grid[np.argmin(np.abs(mapped - target_q_lo))]
@@ -721,28 +608,20 @@ def calibrated_interval(mu, sigma, iso_calibrator, conf=0.90):
     return mu + z_lo * sigma, mu + z_hi * sigma
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7.  Evaluation (accuracy + UQ + deployment metrics)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def evaluate_soh(model, val_loader, test_loader, cfg):
     print("\n" + "=" * 60)
-    print("  SOH EVALUATION - TEST SET")
+    print("  SOH EVALUATION - TEST SET (Config A: Baseline)")
     print("=" * 60)
 
-    # --- accuracy + raw UQ on val (for calibration fitting) ---
     y_val, mu_val, sigma_val, _, _ = get_predictions(model, val_loader, cfg)
-
-    # --- accuracy + raw UQ on test ---
     y_true, y_pred, sigma_test, aleatoric, epistemic = get_predictions(model, test_loader, cfg)
 
     mae = mean_absolute_error(y_true, y_pred) * 100
     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2)) * 100
     r2 = r2_score(y_true, y_pred)
-    # MAPE: guard against near-zero SOH values (shouldn't occur but be safe)
     mape = mean_absolute_percentage_error(np.clip(y_true, 1e-6, None), y_pred) * 100
 
-    z = 1.645  # nominal 90% Gaussian z, UNCALIBRATED
+    z = 1.645  # nominal 90% Gaussian z
     y_lo_raw = y_pred - z * sigma_test
     y_hi_raw = y_pred + z * sigma_test
     picp_raw = np.mean((y_true >= y_lo_raw) & (y_true <= y_hi_raw))
@@ -766,7 +645,7 @@ def evaluate_soh(model, val_loader, test_loader, cfg):
         pinw_cal = np.mean(y_hi_cal - y_lo_cal) / (y_true.max() - y_true.min() + 1e-8)
         print(f"\n  -- CALIBRATED intervals (isotonic, fit on val) --")
         print(f"  PICP : {picp_cal:.4f}  (target ~0.90)")
-        print(f"  PINW : {pinw_cal:.4f}  (lower = better; compare to uncalibrated PINW above)")
+        print(f"  PINW : {pinw_cal:.4f}")
         results.update({"picp_calibrated": picp_cal, "pinw_calibrated": pinw_cal})
 
     if cfg["evidential"]:
@@ -790,7 +669,7 @@ def evaluate_soh(model, val_loader, test_loader, cfg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8.  Complexity & deployment metrics
+# 7.  Deployment Metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
 def count_parameters(model):
@@ -800,9 +679,6 @@ def count_parameters(model):
 
 
 def model_size_mb(model):
-    """Actual serialized size (fp32 state_dict) - more honest than
-    param_count * 4 bytes because it includes buffers (BatchNorm running
-    stats etc.) that a naive parameter count misses."""
     tmp_path = "_tmp_size_check.pt"
     torch.save(model.state_dict(), tmp_path)
     size_mb = os.path.getsize(tmp_path) / (1024 ** 2)
@@ -811,22 +687,6 @@ def model_size_mb(model):
 
 
 def analytical_complexity(cfg):
-    """Back-of-envelope FLOPs/complexity note (architecture-level, not a
-    profiler trace - report both this AND measured wall-clock latency below;
-    reviewers expect both).
-
-    - MultiScaleCNN: O(L * sum(C_in * C_out * k)) per branch, i.e. linear in
-      sequence length L, same as any 1D conv stack.
-    - MambaBlock (per layer): the selective-scan recurrence is O(L * D * N)
-      (D = d_inner, N = d_state) -- LINEAR in L, vs. O(L^2 * D) for a
-      standard self-attention layer of the same width. This is the
-      complexity argument for using Mamba over a Transformer encoder here.
-    - Bidirectional doubles the Mamba cost (2x forward passes through the
-      recurrence) but stays O(L) in L, only the constant factor changes.
-    - EvidentialHead adds a negligible O(d_model) MLP vs GaussianHead
-      (4 outputs instead of 2) -- UQ style is NOT the complexity bottleneck,
-      the encoder is.
-    """
     D = cfg["d_model"]
     d_inner = int(cfg["expand"] * D)
     N = cfg["d_state"]
@@ -834,13 +694,11 @@ def analytical_complexity(cfg):
     n_layers = cfg["n_mamba_layers"]
     dirs = 2 if cfg["bidirectional"] else 1
 
-    # very rough FLOP estimate for the SSM recurrence only (dominant term)
-    ssm_flops_per_layer = L * d_inner * N * 4     # dA, dB_u, elementwise mul+sum, accumulate
+    ssm_flops_per_layer = L * d_inner * N * 4
     ssm_total = ssm_flops_per_layer * n_layers * dirs
 
     cnn_flops = 0
     for ch, k in zip(cfg["cnn_channels"], cfg["cnn_kernels"]):
-        # 2 conv layers per branch, input_dim/ch -> ch/ch
         cnn_flops += 2 * L * ch * ch * k
 
     return {
@@ -856,9 +714,6 @@ def analytical_complexity(cfg):
 
 @torch.no_grad()
 def measure_inference_latency(model, cfg, warmup=10):
-    """Wall-clock latency + throughput at several batch sizes, on whatever
-    DEVICE is active. This is what actually matters for a deployment claim
-    -- report this ALONGSIDE the analytical FLOPs estimate, not instead of it."""
     model.eval()
     results = {}
     L, D_in = cfg["window_size"], cfg["input_dim"]
@@ -893,7 +748,7 @@ def measure_inference_latency(model, cfg, warmup=10):
 
 def print_deployment_report(model, cfg):
     print("\n" + "=" * 60)
-    print("  MODEL COMPLEXITY & DEPLOYMENT METRICS")
+    print("  MODEL COMPLEXITY & DEPLOYMENT METRICS (Config A)")
     print("=" * 60)
 
     total, trainable = count_parameters(model)
@@ -902,7 +757,7 @@ def print_deployment_report(model, cfg):
     latency = measure_inference_latency(model, cfg)
 
     print(f"\n  Parameters       : {total:,} total | {trainable:,} trainable")
-    print(f"  Model size (fp32): {size_mb:.3f} MB  (state_dict on disk)")
+    print(f"  Model size (fp32): {size_mb:.3f} MB")
     print(f"  Input shape      : ({cfg['window_size']}, {cfg['input_dim']})")
     print(f"  Encoder          : {'Bidirectional' if cfg['bidirectional'] else 'Causal'} "
           f"Mamba x{cfg['n_mamba_layers']} layers")
@@ -928,13 +783,12 @@ def print_deployment_report(model, cfg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9.  Main
+# 8.  Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  TRAINING BEM-SOH")
-    print("  (Bidirectional Evidential Mamba for SOH + calibrated UQ)")
+    print("  CONFIGURATION A: Baseline (Causal + Gaussian)")
     print("=" * 60)
     print(f"Device: {DEVICE}")
 
@@ -950,7 +804,6 @@ if __name__ == "__main__":
                               weighted=True, tail_weight=CFG["tail_weight"])
     test_ds = SequenceDataset(soh_df, W, CFG["soh_stride"], "test")
 
-    # sanity check: no cell should appear in more than one split
     cells_train = set(train_ds.cell_ids)
     cells_val = set(val_ds.cell_ids)
     cells_test = set(test_ds.cell_ids)
@@ -965,7 +818,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_ds, batch_size=CFG["soh_batch"], shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=CFG["soh_batch"], shuffle=False)
 
-    print("\nBuilding BEM-SOH model...")
+    print("\nBuilding BEM-SOH model (Config A: Causal + Gaussian)...")
     model = BEM_SOH(CFG).to(DEVICE)
     total, trainable = count_parameters(model)
     print(f"  Parameters: {total:,} total | {trainable:,} trainable")
@@ -989,7 +842,7 @@ if __name__ == "__main__":
     print(f"\n  Model saved -> {CFG['save_path']}")
 
     print("\n" + "=" * 60)
-    print("  FINAL RESULTS SUMMARY")
+    print("  FINAL RESULTS SUMMARY (Config A)")
     print("=" * 60)
     print(json.dumps({**results, **{"total_params": deploy["total_params"],
                                      "model_size_mb": deploy["model_size_mb"]}},
