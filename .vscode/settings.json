@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
-        "./configurations"
+        "./configurations",
+        "./model_architecture"
     ]
 }
