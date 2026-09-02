@@ -1,11 +1,6 @@
-# fine_tune_nca_improved.py
-# Improved fine-tuning of BEM-SOH from MIT checkpoint on NCA data
-# Key improvements:
-#   1. Reset evidence parameters (nu, alpha) before fine-tuning
-#   2. Lower learning rate (1e-5 instead of 5e-5)
-#   3. Longer warmup (10 epochs)
-#   4. Evidence penalty to prevent inflation
-#   5. Selective fine-tuning (only head layers)
+# fine_tune_nca.py
+# Fine-tune BEM-SOH from MIT checkpoint on NCA data
+# Purpose: Test architecture adaptability to NCA chemistry
 
 import os
 import math
@@ -17,7 +12,6 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error
 from sklearn.isotonic import IsotonicRegression
-from scipy.stats import norm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Config — IMPROVED FINE-TUNING SETTINGS
+# 1. Config — SAME as NCA training but with fine-tuning settings
 # ─────────────────────────────────────────────────────────────────────────────
 
 SEED = 42
@@ -36,6 +30,7 @@ torch.cuda.manual_seed_all(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
+# ─── NCA FEATURES (8 features) ───
 NCA_FEAT_COLS = [
     "charge_capacity",
     "charge_energy",
@@ -48,14 +43,17 @@ NCA_FEAT_COLS = [
 ]
 
 CFG = dict(
+    # Paths
     data_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\generalization_test\generalization_results\nca_processed.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\nca_finetuned_improved.pt",
+    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\nca_finetuned_best.pt",
     mit_checkpoint = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\bem_soh_best.pt",
 
+    # Features
     input_dim  = 8,
     window_size = 50,
     soh_stride  = 2,
 
+    # Model (IDENTICAL to MIT)
     cnn_channels = [32, 64, 128],
     cnn_kernels  = [3, 7, 15],
     d_model      = 128,
@@ -65,31 +63,33 @@ CFG = dict(
     n_mamba_layers = 3,
     dropout      = 0.15,
 
+    # Architecture (IDENTICAL to MIT)
     bidirectional = True,
     evidential    = True,
     calibrate     = True,
 
-    # ─── IMPROVED FINE-TUNING SETTINGS ───
-    soh_epochs   = 60,
-    soh_lr       = 1e-5,             # Lower: 5e-5 → 1e-5
+    # ─── FINE-TUNING SETTINGS ───
+    soh_epochs   = 50,              # Fewer epochs
+    soh_lr       = 5e-5,            # Lower learning rate (vs 2e-4)
     soh_batch    = 256,
-    soh_wd       = 1e-4,
-    soh_patience = 20,
+    soh_wd       = 1e-4,            # Same weight decay
+    soh_patience = 15,              # Stop earlier
     tail_weight  = 3.0,
-    warmup_epochs = 10,              # Longer warmup
+    warmup_epochs = 5,              # Shorter warmup
 
-    nig_mse_warmup_epochs = 5,
+    # ─── EVIDENTIAL (SAME as MIT) ───
+    nig_mse_warmup_epochs = 5,      # Shorter warmup
     evid_lambda   = 0.01,
     evid_lambda_max = 0.05,
     evid_mse_weight = 1.0,
-    evid_penalty_weight = 0.1,       # Penalty for high evidence
 
+    # Deployment metrics
     latency_batch_sizes = [1, 32, 256],
     latency_reps = 100,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Data loading
+# 2. Data loading (SAME as NCA training)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_nca_data(data_path):
@@ -134,7 +134,7 @@ class NCASequenceDataset(Dataset):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Model (Full BEM-SOH Architecture)
+# 3. Model (IDENTICAL to MIT and NCA training)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MultiScaleCNN(nn.Module):
@@ -262,24 +262,6 @@ class EvidentialHead(nn.Module):
         return gamma, nu, alpha, beta
 
 
-class GaussianHead(nn.Module):
-    def __init__(self, d_model, dropout=0.15):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_model, 128), nn.LayerNorm(128), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 64), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, 2),
-        )
-
-    def forward(self, z):
-        out = self.net(z)
-        mu = torch.sigmoid(out[:, 0])
-        log_var = out[:, 1].clamp(-10, 5)
-        return mu, log_var
-
-
 class BEM_SOH(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -332,8 +314,26 @@ class BEM_SOH(nn.Module):
         return self.head(z), attn
 
 
+class GaussianHead(nn.Module):
+    def __init__(self, d_model, dropout=0.15):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, 128), nn.LayerNorm(128), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, z):
+        out = self.net(z)
+        mu = torch.sigmoid(out[:, 0])
+        log_var = out[:, 1].clamp(-10, 5)
+        return mu, log_var
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Losses (with evidence penalty for fine-tuning)
+# 4. Losses (IDENTICAL to MIT and NCA training)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def mse_warmup_loss(pred_mean, target, weight=None):
@@ -360,26 +360,20 @@ def evidential_regularizer(gamma, nu, alpha, y):
     return error * evidence
 
 
-def evidential_loss(gamma, nu, alpha, beta, y, weight=None, lam=0.01, mse_weight=1.0, evid_penalty=0.0):
+def evidential_loss(gamma, nu, alpha, beta, y, weight=None, lam=0.01, mse_weight=1.0):
     y_c = torch.clamp(y, 0.0, 1.0)
     gamma_c = torch.clamp(gamma, 0.0, 1.0)
     mse = (gamma_c - y_c) ** 2
-    
-    # Evidence penalty: penalize high evidence during fine-tuning
-    evidence = 2 * nu + alpha
-    evidence_penalty = evid_penalty * evidence.mean()
-    
     loss = nig_nll(gamma, nu, alpha, beta, y) \
         + lam * evidential_regularizer(gamma, nu, alpha, y) \
-        + mse_weight * mse \
-        + evidence_penalty
+        + mse_weight * mse
     if weight is not None:
         loss = loss * weight
     return loss.mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Training Utilities
+# 5. Training (Fine-Tuning Version)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cosine_lr(optimizer, epoch, warmup, total_epochs, base_lr):
@@ -394,7 +388,7 @@ def cosine_lr(optimizer, epoch, warmup, total_epochs, base_lr):
 
 
 class EarlyStopping:
-    def __init__(self, patience=20, delta=1e-5):
+    def __init__(self, patience=15, delta=1e-5):
         self.patience = patience
         self.delta = delta
         self.counter = 0
@@ -427,120 +421,16 @@ def forward_and_loss(model, x, y, w, cfg, epoch):
         prog = min(1.0, (epoch - cfg["nig_mse_warmup_epochs"]) /
                    max(1, cfg["soh_epochs"] - cfg["nig_mse_warmup_epochs"]))
         lam = cfg["evid_lambda"] + prog * (cfg["evid_lambda_max"] - cfg["evid_lambda"])
-        evid_penalty = cfg.get("evid_penalty_weight", 0.0)
         loss = evidential_loss(gamma, nu, alpha, beta, y, weight=w, lam=lam,
-                                mse_weight=cfg["evid_mse_weight"],
-                                evid_penalty=evid_penalty)
+                                mse_weight=cfg["evid_mse_weight"])
 
     return loss, gamma
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. Evaluation Functions
-# ─────────────────────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def get_predictions(model, loader, cfg):
-    model.eval()
-    all_y, all_mu, all_sigma = [], [], []
-    all_aleatoric, all_epistemic = [], []
-
-    for x, y, w in loader:
-        x = x.to(DEVICE)
-        out, _ = model(x)
-        gamma, nu, alpha, beta = out
-        aleatoric = (beta / (alpha - 1)).cpu().numpy()
-        epistemic = (beta / (nu * (alpha - 1))).cpu().numpy()
-        sigma = np.sqrt(aleatoric + epistemic)
-        mu = gamma.cpu().numpy()
-        all_aleatoric.extend(aleatoric)
-        all_epistemic.extend(epistemic)
-        all_mu.extend(mu)
-        all_sigma.extend(sigma)
-        all_y.extend(y.numpy())
-
-    return (np.array(all_y), np.array(all_mu), np.array(all_sigma),
-            np.array(all_aleatoric), np.array(all_epistemic))
-
-
-def fit_isotonic_calibrator(y_true, mu, sigma, n_q=20):
-    quantiles = np.linspace(0.05, 0.95, n_q)
-    empirical = []
-    for q in quantiles:
-        z = norm.ppf(q)
-        covered = (y_true <= mu + z * sigma).mean()
-        empirical.append(covered)
-    iso = IsotonicRegression(out_of_bounds="clip")
-    iso.fit(quantiles, empirical)
-    return iso
-
-
-def calibrated_interval(mu, sigma, iso_calibrator, conf=0.90):
-    target_q_lo, target_q_hi = (1 - conf) / 2, 1 - (1 - conf) / 2
-    grid = np.linspace(0.001, 0.999, 400)
-    mapped = iso_calibrator.predict(grid)
-    q_lo = grid[np.argmin(np.abs(mapped - target_q_lo))]
-    q_hi = grid[np.argmin(np.abs(mapped - target_q_hi))]
-    z_lo, z_hi = norm.ppf(q_lo), norm.ppf(q_hi)
-    return mu + z_lo * sigma, mu + z_hi * sigma
-
-
-def evaluate_soh(model, val_loader, test_loader, cfg):
-    print("\n" + "=" * 60)
-    print("  SOH EVALUATION - NCA TEST SET (Improved Fine-Tuning)")
-    print("=" * 60)
-
-    y_val, mu_val, sigma_val, _, _ = get_predictions(model, val_loader, cfg)
-    y_true, y_pred, sigma_test, aleatoric, epistemic = get_predictions(model, test_loader, cfg)
-
-    mae = mean_absolute_error(y_true, y_pred) * 100
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2)) * 100
-    r2 = r2_score(y_true, y_pred)
-    mape = mean_absolute_percentage_error(np.clip(y_true, 1e-6, None), y_pred) * 100
-
-    z = 1.645
-    y_lo_raw = y_pred - z * sigma_test
-    y_hi_raw = y_pred + z * sigma_test
-    picp_raw = np.mean((y_true >= y_lo_raw) & (y_true <= y_hi_raw))
-    pinw_raw = np.mean(y_hi_raw - y_lo_raw) / (y_true.max() - y_true.min() + 1e-8)
-
-    print(f"\n  MAE  : {mae:.4f}%")
-    print(f"  RMSE : {rmse:.4f}%")
-    print(f"  MAPE : {mape:.4f}%")
-    print(f"  R2   : {r2:.5f}")
-    print(f"\n  -- UNCALIBRATED intervals (nominal 90% Gaussian) --")
-    print(f"  PICP : {picp_raw:.4f}")
-    print(f"  PINW : {pinw_raw:.4f}")
-
-    results = {"mae": mae, "rmse": rmse, "mape": mape, "r2": r2,
-               "picp_raw": picp_raw, "pinw_raw": pinw_raw}
-
-    if cfg["calibrate"]:
-        iso = fit_isotonic_calibrator(y_val, mu_val, sigma_val)
-        y_lo_cal, y_hi_cal = calibrated_interval(y_pred, sigma_test, iso, conf=0.90)
-        picp_cal = np.mean((y_true >= y_lo_cal) & (y_true <= y_hi_cal))
-        pinw_cal = np.mean(y_hi_cal - y_lo_cal) / (y_true.max() - y_true.min() + 1e-8)
-        print(f"\n  -- CALIBRATED intervals (isotonic, fit on val) --")
-        print(f"  PICP : {picp_cal:.4f}  (target ~0.90)")
-        print(f"  PINW : {pinw_cal:.4f}")
-        results.update({"picp_calibrated": picp_cal, "pinw_calibrated": pinw_cal})
-
-    print(f"\n  -- Uncertainty decomposition --")
-    print(f"  Mean aleatoric var  : {np.nanmean(aleatoric):.6f}")
-    print(f"  Mean epistemic var  : {np.nanmean(epistemic):.6f}")
-    results.update({"mean_aleatoric": float(np.nanmean(aleatoric)),
-                     "mean_epistemic": float(np.nanmean(epistemic))})
-
-    return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. Fine-Tuning Training Loop
-# ─────────────────────────────────────────────────────────────────────────────
-
 def fine_tune_soh(model, train_ds, val_ds, cfg):
     print("\n" + "=" * 60)
-    print("  FINE-TUNING BEM-SOH ON NCA (IMPROVED)")
+    print("  FINE-TUNING BEM-SOH ON NCA")
+    print("  (Architecture Adaptability Test)")
     print("=" * 60)
 
     batch = cfg["soh_batch"]
@@ -548,8 +438,7 @@ def fine_tune_soh(model, train_ds, val_ds, cfg):
     val_loader = DataLoader(val_ds, batch_size=batch, shuffle=False)
 
     print(f"  Train: {len(train_ds):,}  |  Val: {len(val_ds):,}")
-    print(f"  Learning rate: {cfg['soh_lr']} (improved - lower)")
-    print(f"  Warmup epochs: {cfg['warmup_epochs']}")
+    print(f"  Learning rate: {cfg['soh_lr']} (fine-tuning)")
     print(f"  Max epochs: {cfg['soh_epochs']}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["soh_lr"], weight_decay=cfg["soh_wd"])
@@ -612,17 +501,119 @@ def fine_tune_soh(model, train_ds, val_ds, cfg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. Main
+# 6. Evaluation (IDENTICAL to NCA training)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def get_predictions(model, loader, cfg):
+    model.eval()
+    all_y, all_mu, all_sigma = [], [], []
+    all_aleatoric, all_epistemic = [], []
+
+    for x, y, w in loader:
+        x = x.to(DEVICE)
+        out, _ = model(x)
+        gamma, nu, alpha, beta = out
+        aleatoric = (beta / (alpha - 1)).cpu().numpy()
+        epistemic = (beta / (nu * (alpha - 1))).cpu().numpy()
+        sigma = np.sqrt(aleatoric + epistemic)
+        mu = gamma.cpu().numpy()
+        all_aleatoric.extend(aleatoric)
+        all_epistemic.extend(epistemic)
+        all_mu.extend(mu)
+        all_sigma.extend(sigma)
+        all_y.extend(y.numpy())
+
+    return (np.array(all_y), np.array(all_mu), np.array(all_sigma),
+            np.array(all_aleatoric), np.array(all_epistemic))
+
+
+def fit_isotonic_calibrator(y_true, mu, sigma, n_q=20):
+    from scipy.stats import norm
+    quantiles = np.linspace(0.05, 0.95, n_q)
+    empirical = []
+    for q in quantiles:
+        z = norm.ppf(q)
+        covered = (y_true <= mu + z * sigma).mean()
+        empirical.append(covered)
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(quantiles, empirical)
+    return iso
+
+
+def calibrated_interval(mu, sigma, iso_calibrator, conf=0.90):
+    from scipy.stats import norm
+    target_q_lo, target_q_hi = (1 - conf) / 2, 1 - (1 - conf) / 2
+    grid = np.linspace(0.001, 0.999, 400)
+    mapped = iso_calibrator.predict(grid)
+    q_lo = grid[np.argmin(np.abs(mapped - target_q_lo))]
+    q_hi = grid[np.argmin(np.abs(mapped - target_q_hi))]
+    z_lo, z_hi = norm.ppf(q_lo), norm.ppf(q_hi)
+    return mu + z_lo * sigma, mu + z_hi * sigma
+
+
+def evaluate_soh(model, val_loader, test_loader, cfg):
+    print("\n" + "=" * 60)
+    print("  SOH EVALUATION - NCA TEST SET (Fine-Tuned)")
+    print("=" * 60)
+
+    y_val, mu_val, sigma_val, _, _ = get_predictions(model, val_loader, cfg)
+    y_true, y_pred, sigma_test, aleatoric, epistemic = get_predictions(model, test_loader, cfg)
+
+    mae = mean_absolute_error(y_true, y_pred) * 100
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2)) * 100
+    r2 = r2_score(y_true, y_pred)
+    mape = mean_absolute_percentage_error(np.clip(y_true, 1e-6, None), y_pred) * 100
+
+    z = 1.645
+    y_lo_raw = y_pred - z * sigma_test
+    y_hi_raw = y_pred + z * sigma_test
+    picp_raw = np.mean((y_true >= y_lo_raw) & (y_true <= y_hi_raw))
+    pinw_raw = np.mean(y_hi_raw - y_lo_raw) / (y_true.max() - y_true.min() + 1e-8)
+
+    print(f"\n  MAE  : {mae:.4f}%")
+    print(f"  RMSE : {rmse:.4f}%")
+    print(f"  MAPE : {mape:.4f}%")
+    print(f"  R2   : {r2:.5f}")
+    print(f"\n  -- UNCALIBRATED intervals (nominal 90% Gaussian) --")
+    print(f"  PICP : {picp_raw:.4f}")
+    print(f"  PINW : {pinw_raw:.4f}")
+
+    results = {"mae": mae, "rmse": rmse, "mape": mape, "r2": r2,
+               "picp_raw": picp_raw, "pinw_raw": pinw_raw}
+
+    if cfg["calibrate"]:
+        iso = fit_isotonic_calibrator(y_val, mu_val, sigma_val)
+        y_lo_cal, y_hi_cal = calibrated_interval(y_pred, sigma_test, iso, conf=0.90)
+        picp_cal = np.mean((y_true >= y_lo_cal) & (y_true <= y_hi_cal))
+        pinw_cal = np.mean(y_hi_cal - y_lo_cal) / (y_true.max() - y_true.min() + 1e-8)
+        print(f"\n  -- CALIBRATED intervals (isotonic, fit on val) --")
+        print(f"  PICP : {picp_cal:.4f}  (target ~0.90)")
+        print(f"  PINW : {pinw_cal:.4f}")
+        results.update({"picp_calibrated": picp_cal, "pinw_calibrated": pinw_cal})
+
+    print(f"\n  -- Uncertainty decomposition --")
+    print(f"  Mean aleatoric var  : {np.nanmean(aleatoric):.6f}")
+    print(f"  Mean epistemic var  : {np.nanmean(epistemic):.6f}")
+    results.update({"mean_aleatoric": float(np.nanmean(aleatoric)),
+                     "mean_epistemic": float(np.nanmean(epistemic))})
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  FINE-TUNING BEM-SOH ON NCA (IMPROVED)")
-    print("  (Evidence Reset + Lower LR + Evidence Penalty)")
+    print("  FINE-TUNING BEM-SOH ON NCA")
+    print("  (Architecture Adaptability Test)")
     print("=" * 60)
     print(f"Device: {DEVICE}")
+    print(f"Input features: {CFG['input_dim']} (NCA-specific)")
 
-    # ─── Load data ───
+    # ─── Load NCA data ───
     print("\nLoading NCA data...")
     df = load_nca_data(CFG["data_path"])
 
@@ -646,36 +637,29 @@ if __name__ == "__main__":
     print(f"  Val sequences:   {len(val_ds):,}")
     print(f"  Test sequences:  {len(test_ds):,}")
 
-    # ─── Build NCA model ───
-    print("\nBuilding BEM-SOH model for NCA...")
+    # ─── Build model from MIT checkpoint ───
+    print("\nLoading MIT pre-trained checkpoint...")
+    checkpoint = torch.load(CFG["mit_checkpoint"], map_location=DEVICE, weights_only=False)
+
+    print("Building BEM-SOH model for NCA (using MIT architecture)...")
     model = BEM_SOH(CFG).to(DEVICE)
 
-    # ─── Load MIT checkpoint ───
-    print(f"Loading MIT checkpoint from: {CFG['mit_checkpoint']}")
-    checkpoint = torch.load(CFG["mit_checkpoint"], map_location=DEVICE, weights_only=False)
+    # Load MIT weights (ignore mismatched input_dim)
+    model_dict = model.state_dict()
     pretrained_dict = checkpoint["model_state_dict"]
 
-    # Filter compatible layers
-    model_dict = model.state_dict()
+    # Filter out incompatible layers (input_dim mismatch)
     pretrained_dict = {
         k: v for k, v in pretrained_dict.items()
         if k in model_dict and v.shape == model_dict[k].shape
     }
+
+    # Load filtered weights
     model_dict.update(pretrained_dict)
     model.load_state_dict(model_dict, strict=False)
+
     print(f"  Loaded {len(pretrained_dict)}/{len(model_dict)} layers from MIT checkpoint")
-
-    # ─── KEY FIX: Reset evidence parameters ───
-    print("  Resetting evidence parameters (nu, alpha) for fine-tuning...")
-    for name, param in model.named_parameters():
-        if 'head' in name:
-            # Reinitialize head layers
-            if len(param.shape) == 2:
-                nn.init.xavier_uniform_(param)
-            else:
-                nn.init.zeros_(param)
-
-    print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # ─── Fine-tune ───
     history = fine_tune_soh(model, train_ds, val_ds, CFG)
@@ -699,7 +683,7 @@ if __name__ == "__main__":
     print(f"\n  Model saved -> {CFG['save_path']}")
 
     print("\n" + "=" * 60)
-    print("  FINAL RESULTS SUMMARY - NCA (Improved Fine-Tuning)")
+    print("  FINAL RESULTS SUMMARY - NCA (Fine-Tuned)")
     print("=" * 60)
     print(json.dumps({**results, "total_params": sum(p.numel() for p in model.parameters())}, indent=2, default=str))
     print("=" * 60)
