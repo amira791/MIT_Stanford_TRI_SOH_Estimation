@@ -1,5 +1,5 @@
-# prepare_ncm_kfold_fixed.py
-# K-Fold by cell with fallback to regular K-Fold
+# prepare_ncm_kfold_clean.py
+# Clean K-Fold by cell
 
 import os
 import re
@@ -7,7 +7,6 @@ import glob
 import warnings
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -16,13 +15,12 @@ warnings.filterwarnings("ignore")
 
 RAW_DIR = r"C:\Users\admin\Desktop\DR2\11 All Datasets\13 SNL Battery Dataset\SNL\SNL NMC\SNL NMC"
 OUT_DIR = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\generalization_test\generalization_results"
-OUT_FILE = os.path.join(OUT_DIR, "ncm_kfold_fixed_processed.csv")
+OUT_FILE = os.path.join(OUT_DIR, "ncm_kfold_clean_processed.csv")
 
 N_FOLDS = 5
 K_FOLD_SEED = 42
 N_EARLY_CYCLES = 10
 RESTRICT_TO_FULL_DOD = True
-STRATIFY_SPLIT_BY_PROTOCOL = True
 MIN_VALID_CAPACITY_FRAC = 0.15
 SPIKE_DEVIATION_FRAC = 0.35
 ROLLING_WINDOW = 7
@@ -36,7 +34,7 @@ BASE_FEAT_COLS = [
 OPTIONAL_VOLTAGE_FEAT = "voltage_range"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1: File finding
+# File finding
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROTOCOL_RE = re.compile(r"NMC_(\d+C)_(\d+-\d+)_([\d.]+-[\d.]+C)")
@@ -67,7 +65,7 @@ def parse_dod_window(cell_id):
     return m.group(2) if m else None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2: Load and clean
+# Load and clean
 # ─────────────────────────────────────────────────────────────────────────────
 
 RENAME_MAP = {
@@ -153,7 +151,7 @@ def process_cell(cell_id, cycle_path, timeseries_path, artifact_log):
     return df, has_voltage
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3: Derived features
+# Derived features
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_derived_features(df, use_voltage):
@@ -187,85 +185,63 @@ def add_derived_features(df, use_voltage):
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 4: K-Fold Splits (FIXED)
+# K-Fold Splits (SIMPLIFIED & ROBUST)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def assign_kfold_splits(df, n_folds=5, seed=42, stratify_by_protocol=True):
-    """Assigns K-Fold by cell splits. Falls back to regular K-Fold if
-    stratification is not possible due to small protocol groups."""
+def assign_kfold_splits(df, n_folds=5, seed=42):
+    """Assigns K-Fold by cell splits - SIMPLIFIED VERSION."""
     
-    cell_info = df[["cell_id", "protocol"]].drop_duplicates()
+    # Get unique cells
+    cell_info = df[["cell_id"]].drop_duplicates()
     cells = cell_info["cell_id"].tolist()
-    protocols = cell_info["protocol"].tolist()
-
+    
     print(f"\n  Assigning K-Fold by cell (n_folds={n_folds})...")
-
-    # Check if stratification is possible
-    protocol_counts = pd.Series(protocols).value_counts()
-    min_protocol_count = protocol_counts.min() if len(protocol_counts) > 0 else 0
+    print(f"  Total cells: {len(cells)}")
     
-    can_stratify = stratify_by_protocol and len(set(protocols)) > 1 and min_protocol_count >= n_folds
+    # Shuffle cells
+    rng = np.random.default_rng(seed)
+    shuffled_idx = rng.permutation(len(cells))
+    shuffled_cells = [cells[i] for i in shuffled_idx]
     
-    if can_stratify:
-        print(f"  Using stratified K-Fold (min protocol count: {min_protocol_count})")
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-        fold_assignments = {}
-        for fold_idx, (train_idx, test_idx) in enumerate(skf.split(cells, protocols)):
-            train_cells = [cells[i] for i in train_idx]
-            test_cells = [cells[i] for i in test_idx]
-
-            # Split train into train+val (80/20)
-            val_split_idx = int(0.8 * len(train_cells))
-            val_cells = train_cells[val_split_idx:]
-            train_cells = train_cells[:val_split_idx]
-
-            fold_assignments[fold_idx] = {
-                "train": set(train_cells),
-                "val": set(val_cells),
-                "test": set(test_cells)
-            }
-            print(f"    Fold {fold_idx+1}: train={len(train_cells)}, val={len(val_cells)}, test={len(test_cells)}")
-    else:
-        if stratify_by_protocol:
-            print(f"  WARNING: Stratification requested but protocol groups too small "
-                  f"(min count: {min_protocol_count} < {n_folds}). Falling back to regular K-Fold.")
-        print("  Using regular K-Fold (no stratification)")
+    # Create folds
+    fold_size = len(shuffled_cells) // n_folds
+    fold_assignments = {}
+    
+    for fold_idx in range(n_folds):
+        start = fold_idx * fold_size
+        end = start + fold_size if fold_idx < n_folds - 1 else len(shuffled_cells)
         
-        rng = np.random.default_rng(seed)
-        shuffled_cells = cells.copy()
-        rng.shuffle(shuffled_cells)
+        test_cells = shuffled_cells[start:end]
+        remaining = [c for c in shuffled_cells if c not in test_cells]
         
-        fold_assignments = {}
-        fold_size = len(shuffled_cells) // n_folds
+        val_split_idx = int(0.8 * len(remaining))
+        val_cells = remaining[val_split_idx:]
+        train_cells = remaining[:val_split_idx]
         
-        for fold_idx in range(n_folds):
-            start = fold_idx * fold_size
-            end = start + fold_size if fold_idx < n_folds - 1 else len(shuffled_cells)
-            
-            test_cells = shuffled_cells[start:end]
-            remaining = [c for c in shuffled_cells if c not in test_cells]
-            
-            val_split_idx = int(0.8 * len(remaining))
-            val_cells = remaining[val_split_idx:]
-            train_cells = remaining[:val_split_idx]
-            
-            fold_assignments[fold_idx] = {
-                "train": set(train_cells),
-                "val": set(val_cells),
-                "test": set(test_cells)
-            }
-            print(f"    Fold {fold_idx+1}: train={len(train_cells)}, val={len(val_cells)}, test={len(test_cells)}")
-
-    # Assign to dataframe
+        fold_assignments[fold_idx] = {
+            "train": set(train_cells),
+            "val": set(val_cells),
+            "test": set(test_cells)
+        }
+        print(f"    Fold {fold_idx+1}: train={len(train_cells)}, val={len(val_cells)}, test={len(test_cells)}")
+    
+    # Assign fold and split to dataframe
     df = df.copy()
     df["fold"] = -1
-    df["split"] = None
+    df["fold_split"] = "none"
+    
     for fold_idx, assignments in fold_assignments.items():
         for split_name, cell_set in assignments.items():
             mask = df["cell_id"].isin(cell_set)
             df.loc[mask, "fold"] = fold_idx
-            df.loc[mask, "split"] = split_name
-
+            df.loc[mask, "fold_split"] = split_name
+    
+    # Verify assignment worked
+    print(f"\n  Verification after assignment:")
+    for fold_idx in range(n_folds):
+        count = (df["fold"] == fold_idx).sum()
+        print(f"    Fold {fold_idx+1}: {count:,} rows")
+    
     return df, fold_assignments
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +250,7 @@ def assign_kfold_splits(df, n_folds=5, seed=42, stratify_by_protocol=True):
 
 def main():
     print("=" * 60)
-    print("  PREPARING NCM DATA (K-Fold by Cell)")
+    print("  PREPARING NCM DATA (K-Fold by Cell) - CLEAN")
     print("=" * 60)
     print(f"  K-Fold: {N_FOLDS} folds")
 
@@ -337,8 +313,7 @@ def main():
     df = add_derived_features(df, use_voltage=use_voltage)
 
     print("\nAssigning K-Fold splits...")
-    df, fold_assignments = assign_kfold_splits(df, n_folds=N_FOLDS, seed=K_FOLD_SEED,
-                                                stratify_by_protocol=STRATIFY_SPLIT_BY_PROTOCOL)
+    df, fold_assignments = assign_kfold_splits(df, n_folds=N_FOLDS, seed=K_FOLD_SEED)
 
     # ─── Final checks ───
     print("\n" + "=" * 60)
@@ -353,14 +328,14 @@ def main():
 
     # ─── Save ───
     os.makedirs(OUT_DIR, exist_ok=True)
-    save_cols = ["cell_id", "cycle_index", "fold", "split", "protocol", "soh"] + feat_cols
+    save_cols = ["cell_id", "cycle_index", "fold", "fold_split", "protocol", "soh"] + feat_cols
     df[save_cols].to_csv(OUT_FILE, index=False)
     print(f"\n  Saved -> {OUT_FILE}")
 
     print("\n  K-Fold Summary:")
     for fold_idx in range(N_FOLDS):
         fold_df = df[df["fold"] == fold_idx]
-        split_counts = fold_df["split"].value_counts()
+        split_counts = fold_df["fold_split"].value_counts()
         print(f"    Fold {fold_idx+1}: train={split_counts.get('train', 0):,}, "
               f"val={split_counts.get('val', 0):,}, test={split_counts.get('test', 0):,}")
 
