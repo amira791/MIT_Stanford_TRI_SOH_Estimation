@@ -1,0 +1,162 @@
+{
+  "summary_mean_std": {
+    "mae": {
+      "mean": 1.5922316039601963,
+      "std": 0.25422348248620064,
+      "values": [
+        1.8084842711687088,
+        1.7328429967164993,
+        1.2353675439953804
+      ]
+    },
+    "rmse": {
+      "mean": "2.3643842",
+      "std": "0.33932465",
+      "values": [
+        "2.5276256",
+        "2.6735651",
+        "1.8919617"
+      ]
+    },
+    "r2": {
+      "mean": 0.9355275829633077,
+      "std": 0.003047197433015846,
+      "values": [
+        0.9326513409614563,
+        0.9397448301315308,
+        0.934186577796936
+      ]
+    },
+    "picp_raw": {
+      "mean": 0.9773064239929089,
+      "std": 0.010411530355558887,
+      "values": [
+        0.9852571017619561,
+        0.9625984251968503,
+        0.9840637450199203
+      ]
+    },
+    "pinw_raw": {
+      "mean": "0.20644964",
+      "std": "0.050906807",
+      "values": [
+        "0.19730672",
+        "0.14917809",
+        "0.27286413"
+      ]
+    },
+    "picp_calibrated": {
+      "mean": 0.8543944225156829,
+      "std": 0.06682959710151988,
+      "values": [
+        0.7975548363897879,
+        0.8174212598425197,
+        0.9482071713147411
+      ]
+    },
+    "pinw_calibrated": {
+      "mean": 0.09995595880329942,
+      "std": 0.049677552357355534,
+      "values": [
+        0.07014750978369985,
+        0.059765890617656144,
+        0.16995447600854227
+      ]
+    }
+  },
+  "pooled_oof": {
+    "n_rows": 5315,
+    "mae": 1.725434884428978,
+    "rmse": "2.5325375",
+    "r2": 0.9376409649848938,
+    "mape": 2.3507259786129,
+    "picp_raw": 0.9764816556914393,
+    "pinw_raw": "0.15724435",
+    "picp_calibrated": 0.819379115710254,
+    "pinw_calibrated": 0.0622304316990724
+  },
+  "individual_folds": [
+    {
+      "mae": 1.8084842711687088,
+      "rmse": "2.5276256",
+      "mape": 2.432624064385891,
+      "r2": 0.9326513409614563,
+      "picp_raw": 0.9852571017619561,
+      "pinw_raw": "0.19730672",
+      "picp_calibrated": 0.7975548363897879,
+      "pinw_calibrated": 0.07014750978369985,
+      "mean_aleatoric": 0.0007948706625029445,
+      "mean_epistemic": 0.0005482269916683435
+    },
+    {
+      "mae": 1.7328429967164993,
+      "rmse": "2.6735651",
+      "mape": 2.439820021390915,
+      "r2": 0.9397448301315308,
+      "picp_raw": 0.9625984251968503,
+      "pinw_raw": "0.14917809",
+      "picp_calibrated": 0.8174212598425197,
+      "pinw_calibrated": 0.059765890617656144,
+      "mean_aleatoric": 0.0008040489628911018,
+      "mean_epistemic": 0.00024377202498726547
+    },
+    {
+      "mae": 1.2353675439953804,
+      "rmse": "1.8919617",
+      "mape": 1.5363874845206738,
+      "r2": 0.934186577796936,
+      "picp_raw": 0.9840637450199203,
+      "pinw_raw": "0.27286413",
+      "picp_calibrated": 0.9482071713147411,
+      "pinw_calibrated": 0.16995447600854227,
+      "mean_aleatoric": 0.0008543198346160352,
+      "mean_epistemic": 0.0002244444185635075
+    }
+  ],
+  "cfg": {
+    "data_path": "C:\\Users\\admin\\Desktop\\DR2\\16 Contributions\\Contr03\\MIT_Stanford_TRI_SOH_Estimation\\generalization_test\\generalization_results\\nca_with_temp_processed_v3_fixed.csv",
+    "save_dir": "C:\\Users\\admin\\Desktop\\DR2\\16 Contributions\\Contr03\\MIT_Stanford_TRI_SOH_Estimation\\checkpoints",
+    "input_dim": 9,
+    "window_size": 50,
+    "soh_stride": 2,
+    "cnn_channels": [
+      32,
+      64,
+      128
+    ],
+    "cnn_kernels": [
+      3,
+      7,
+      15
+    ],
+    "d_model": 128,
+    "d_state": 16,
+    "d_conv": 4,
+    "expand": 2,
+    "n_mamba_layers": 3,
+    "dropout": 0.15,
+    "bidirectional": true,
+    "evidential": true,
+    "calibrate": true,
+    "n_folds": 3,
+    "kfold_seed": 42,
+    "fold_val_frac": 0.2,
+    "soh_epochs": 120,
+    "soh_lr": 0.0002,
+    "soh_batch": 256,
+    "soh_wd": 0.0001,
+    "soh_patience": 25,
+    "tail_weight": 3.0,
+    "warmup_epochs": 10,
+    "nig_mse_warmup_epochs": 10,
+    "evid_lambda": 0.01,
+    "evid_lambda_max": 0.05,
+    "evid_mse_weight": 1.0,
+    "latency_batch_sizes": [
+      1,
+      32,
+      256
+    ],
+    "latency_reps": 100
+  }
+}
