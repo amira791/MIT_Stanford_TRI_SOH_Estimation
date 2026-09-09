@@ -1,0 +1,13 @@
+Parameter,Value
+Valid cells,134
+Total cycles,"113,896"
+Cycle range,3 - 2237
+SOH range,0.761 - 1.000
+SOH mean,0.964
+Features,25
+Train cells,93
+Train rows,78741
+Val cells,13
+Val rows,10918
+Test cells,28
+Test rows,24237
