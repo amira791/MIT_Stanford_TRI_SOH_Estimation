@@ -1,0 +1,2 @@
+total_json_files,valid_files,invalid_files,unique_physical_cells,avg_channels_per_cell,min_channels_per_cell,max_channels_per_cell,multi_channel_cells,channel_distribution
+140,140,0,135,1.037037037037037,1,2,5,"{1: 130, 2: 5}"
