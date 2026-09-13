@@ -1,6 +1,6 @@
-# ablation_window_size.py
-# Window size ablation study: train BEM-SOH with L = 30, 40, 50, 60
-# and compare test MAE to justify L=50.
+# ablation_window_size_skip50.py
+# Window size ablation study: train BEM-SOH with L = 30, 40, 60
+# and add existing L=50 results at the end.
 
 import os
 import math
@@ -31,10 +31,25 @@ torch.cuda.manual_seed_all(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
-# Window sizes to test
-WINDOW_SIZES = [30, 40, 50, 60]
+# ─── Window sizes to train (L=50 skipped, already have results) ───
+WINDOW_SIZES = [30, 40, 60]
 
-# Base configuration (same for all window sizes)
+# ─── Existing L=50 results (from your main training) ───
+EXISTING_L50_RESULTS = {
+    "window_size": 50,
+    "mae": 0.1156,
+    "rmse": 0.2590,
+    "r2": 0.9967,
+    "picp_raw": 0.9890,
+    "pinw_raw": 0.0760,
+    "picp_calibrated": 0.9432,
+    "pinw_calibrated": 0.0226,
+    "mean_aleatoric": 4.05e-5,
+    "mean_epistemic": 5.96e-6,
+    "n_test_windows": 11416,
+}
+
+# ─── Base configuration ───
 BASE_CFG = dict(
     soh_path  = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
     save_dir  = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\window_ablation",
@@ -602,9 +617,10 @@ def evaluate_model(model, val_loader, test_loader, cfg):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  WINDOW SIZE ABLATION STUDY")
+    print("  WINDOW SIZE ABLATION STUDY (L=50 SKIPPED)")
     print("=" * 60)
-    print(f"  Window sizes: {WINDOW_SIZES}")
+    print(f"  Training window sizes: {WINDOW_SIZES}")
+    print(f"  Using existing results for L=50")
     print(f"  Device: {DEVICE}")
 
     # ─── Load data once ───
@@ -614,6 +630,7 @@ if __name__ == "__main__":
 
     all_results = []
 
+    # ─── Train L=30, 40, 60 ───
     for W in WINDOW_SIZES:
         print("\n" + "=" * 60)
         print(f"  WINDOW SIZE = {W}")
@@ -681,6 +698,20 @@ if __name__ == "__main__":
             json.dump(results, f, indent=2, default=str)
         print(f"  Results saved -> {intermediate_path}")
 
+    # ─── Add existing L=50 results ───
+    print("\n" + "=" * 60)
+    print("  ADDING EXISTING RESULTS FOR WINDOW SIZE = 50")
+    print("=" * 60)
+    all_results.append(EXISTING_L50_RESULTS)
+    print(f"  MAE:              {EXISTING_L50_RESULTS['mae']:.4f}%")
+    print(f"  RMSE:             {EXISTING_L50_RESULTS['rmse']:.4f}%")
+    print(f"  R²:               {EXISTING_L50_RESULTS['r2']:.4f}")
+    print(f"  PICP (calibrated):{EXISTING_L50_RESULTS['picp_calibrated']:.4f}")
+    print(f"  PINW (calibrated):{EXISTING_L50_RESULTS['pinw_calibrated']:.4f}")
+
+    # ─── Sort by window size ───
+    all_results = sorted(all_results, key=lambda r: r["window_size"])
+
     # ─── Summary table ───
     print("\n" + "=" * 60)
     print("  WINDOW SIZE ABLATION — SUMMARY")
@@ -690,9 +721,10 @@ if __name__ == "__main__":
     print(f"  {'-'*8} {'-'*12} {'-'*12} {'-'*10} {'-'*12} {'-'*12}")
 
     for r in all_results:
+        marker = " ← existing" if r["window_size"] == 50 else ""
         print(f"  {r['window_size']:<8} {r['mae']:<12.4f} {r['rmse']:<12.4f} "
               f"{r['r2']:<10.4f} {r['picp_calibrated']:<12.4f} "
-              f"{r['pinw_calibrated']:<12.4f}")
+              f"{r['pinw_calibrated']:<12.4f}{marker}")
 
     # ─── Best window size ───
     best_mae = min(all_results, key=lambda r: r["mae"])
