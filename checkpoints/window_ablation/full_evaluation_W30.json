@@ -1,0 +1,39 @@
+{
+  "window_size": 30,
+  "performance": {
+    "mae": 0.09165825322270393,
+    "rmse": "0.16549148",
+    "mape": 0.0998532515950501,
+    "r2": 0.9986438155174255,
+    "max_error": "5.678791"
+  },
+  "uncertainty": {
+    "picp_raw": 0.9958141124209807,
+    "picp_cal": 0.9109003929608748,
+    "pinw_raw": "0.07595423",
+    "pinw_cal": 0.01750605818317128,
+    "nll": "-4.8032207",
+    "mean_aleatoric": 3.9701473724562675e-05,
+    "mean_epistemic": 6.2029221226111986e-06
+  },
+  "deployment": {
+    "total_params": 1120485,
+    "trainable_params": 1120485,
+    "model_size_mb": 4.321261405944824,
+    "latency": {
+      "batch_1": {
+        "ms_per_sample": 19.8745,
+        "throughput": 50.3
+      },
+      "batch_32": {
+        "ms_per_sample": 0.635,
+        "throughput": 1574.7
+      },
+      "batch_256": {
+        "ms_per_sample": 0.2329,
+        "throughput": 4294.3
+      }
+    },
+    "device": "cuda"
+  }
+}
