@@ -43,11 +43,11 @@ print(f"Device: {DEVICE}")
 CFG = dict(
     # Paths
     soh_path  = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\config_B_bidirectional_gaussian.pt",
+    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\config_B_bidirectional_gaussian_30.pt",
 
     # Features
     input_dim  = 10,
-    window_size = 50,
+    window_size = 30,
     soh_stride  = 2,
 
     # Model

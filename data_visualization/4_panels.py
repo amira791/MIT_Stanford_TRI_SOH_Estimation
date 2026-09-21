@@ -1,21 +1,43 @@
-# evaluate_config_D_from_checkpoint.py
-# Re-evaluate your saved model WITHOUT calibration to get Config D results
-# Standalone version — all dependencies copied from train_final_model.py
 
-import os, math, time, warnings, json
+
+import os
+import json
 import numpy as np
 import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_absolute_error, mean_absolute_percentage_error
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.isotonic import IsotonicRegression
+from scipy.stats import norm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import warnings
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1.  Config
+# Publication style
+# ─────────────────────────────────────────────────────────────────────────────
+
+matplotlib.rcParams['font.family'] = 'sans-serif'
+matplotlib.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
+matplotlib.rcParams['font.size'] = 9
+matplotlib.rcParams['axes.labelsize'] = 10
+matplotlib.rcParams['axes.titlesize'] = 10
+matplotlib.rcParams['legend.fontsize'] = 8
+matplotlib.rcParams['xtick.labelsize'] = 8
+matplotlib.rcParams['ytick.labelsize'] = 8
+matplotlib.rcParams['figure.dpi'] = 300
+matplotlib.rcParams['savefig.dpi'] = 300
+matplotlib.rcParams['savefig.bbox'] = 'tight'
+
+OUT_PATH = "results.png"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config
 # ─────────────────────────────────────────────────────────────────────────────
 
 SEED = 42
@@ -26,55 +48,16 @@ torch.cuda.manual_seed_all(SEED)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
-# Base configuration (same as your main script)
-CFG = dict(
-    # Paths
-    soh_path  = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv",
-    save_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\bem_soh_best_30.pt",
+WINDOW_SIZE = 30
 
-    # Features
-    input_dim  = 10,
-    window_size = 30,
-    soh_stride  = 2,
-
-    # Model
-    cnn_channels = [32, 64, 128],
-    cnn_kernels  = [3, 7, 15],
-    d_model      = 128,
-    d_state      = 16,
-    d_conv       = 4,
-    expand       = 2,
-    n_mamba_layers = 3,
-    dropout      = 0.15,
-
-    bidirectional = True,
-    evidential    = True,
-    calibrate     = False,   # Will be overridden by checkpoint anyway
-
-    # Training
-    soh_epochs   = 120,
-    soh_lr       = 2e-4,
-    soh_batch    = 256,
-    soh_wd       = 1e-4,
-    soh_patience = 25,
-    tail_weight  = 3.0,
-    warmup_epochs = 10,
-
-    nig_mse_warmup_epochs = 10,
-    evid_lambda   = 0.01,
-    evid_lambda_max = 0.05,
-    evid_mse_weight = 1.0,
-
-    latency_batch_sizes = [1, 32, 256],
-    latency_reps = 100,
-)
+CHECKPOINT_PATH = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\window_ablation\bem_soh_W30.pt"
+SOH_DATA_PATH = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\data_preprocessing\final_dataset\soh\soh_full.csv"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.  Data loading & preprocessing
+# Data loading & preprocessing
 # ─────────────────────────────────────────────────────────────────────────────
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add per-cell relative features."""
     df = df.copy()
     cap_rel_list, en_rel_list, ir_rel_list, cycle_pos_list = [], [], [], []
 
@@ -121,42 +104,34 @@ def load_soh_data(soh_path):
 
 
 class SequenceDataset(Dataset):
-    """Sliding-window dataset for SOH."""
-    def __init__(self, df, window_size, stride=1, split=None,
-                 weighted=False, tail_thr=0.90, tail_weight=1.0):
+    def __init__(self, df, window_size, stride=1, split=None):
         self.samples = []
-        self.weights = []
         self.cell_ids = []
+        self.end_cycles = []
         subset = df if split is None else df[df.split == split]
 
         for cid, cell_df in subset.groupby("cell_id"):
             cell_df = cell_df.sort_values("cycle_index").reset_index(drop=True)
             X = cell_df[FEAT_COLS].values.astype(np.float32)
             y = cell_df["soh"].values.astype(np.float32)
+            cycle_idx = cell_df["cycle_index"].values
 
             for end in range(window_size, len(X) + 1, stride):
                 start = end - window_size
-                y_last = y[end - 1]
-                self.samples.append((X[start:end], y_last))
+                self.samples.append((X[start:end], y[end - 1]))
                 self.cell_ids.append(cid)
-                if weighted:
-                    w = tail_weight if y_last < tail_thr else 1.0
-                else:
-                    w = 1.0
-                self.weights.append(w)
-
-        self.weights = np.array(self.weights, dtype=np.float32)
+                self.end_cycles.append(cycle_idx[end - 1])
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         x, y = self.samples[idx]
-        return torch.tensor(x), torch.tensor(y), torch.tensor(self.weights[idx])
+        return torch.tensor(x), torch.tensor(y), torch.tensor(0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  Model (Full BEM-SOH architecture)
+# Model definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MultiScaleCNN(nn.Module):
@@ -187,18 +162,15 @@ class MambaBlock(nn.Module):
         self.d_model = d_model
         self.d_state = d_state
         self.d_inner = int(expand * d_model)
-
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         self.conv1d = nn.Conv1d(self.d_inner, self.d_inner,
                                  kernel_size=d_conv, padding=d_conv - 1,
                                  groups=self.d_inner, bias=True)
         self.x_proj = nn.Linear(self.d_inner, d_state + d_state + 1, bias=False)
         self.dt_proj = nn.Linear(1, self.d_inner, bias=True)
-
         A = torch.arange(1, d_state + 1, dtype=torch.float32).unsqueeze(0)
         self.A_log = nn.Parameter(torch.log(A.expand(self.d_inner, -1)))
         self.D = nn.Parameter(torch.ones(self.d_inner))
-
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
@@ -272,7 +244,7 @@ class EvidentialHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(128, 64), nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(64, 4),  # gamma, log_nu, log_alpha, log_beta
+            nn.Linear(64, 4),
         )
 
     def forward(self, z):
@@ -308,12 +280,7 @@ class BEM_SOH(nn.Module):
                                          C["expand"], C["n_mamba_layers"], C["dropout"])
 
         self.attn_pool = nn.Linear(C["d_model"], 1)
-
-        if C["evidential"]:
-            self.head = EvidentialHead(C["d_model"], C["dropout"])
-        else:
-            self.head = GaussianHead(C["d_model"], C["dropout"])
-
+        self.head = EvidentialHead(C["d_model"], C["dropout"])
         self._init_weights()
 
     def _init_weights(self):
@@ -336,184 +303,213 @@ class BEM_SOH(nn.Module):
         return self.head(z), attn
 
 
-class GaussianHead(nn.Module):
-    def __init__(self, d_model, dropout=0.15):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_model, 128), nn.LayerNorm(128), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 64), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, 2),  # [mean, log_var]
-        )
-
-    def forward(self, z):
-        out = self.net(z)
-        mu = torch.sigmoid(out[:, 0])
-        log_var = out[:, 1].clamp(-10, 5)
-        return mu, log_var
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 4.  get_predictions (for evaluation)
+# Prediction extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def get_predictions(model, loader, cfg):
-    """Returns point pred, total sigma, and (if evidential) the
-    aleatoric/epistemic decomposition."""
+def get_predictions(model, loader):
     model.eval()
     all_y, all_mu, all_sigma = [], [], []
     all_aleatoric, all_epistemic = [], []
+    all_attn = []
 
     for x, y, _ in loader:
         x = x.to(DEVICE)
-        out, _ = model(x)
-        if cfg["evidential"]:
-            gamma, nu, alpha, beta = out
-            aleatoric = (beta / (alpha - 1)).cpu().numpy()
-            epistemic = (beta / (nu * (alpha - 1))).cpu().numpy()
-            sigma = np.sqrt(aleatoric + epistemic)
-            mu = gamma.cpu().numpy()
-            all_aleatoric.extend(aleatoric)
-            all_epistemic.extend(epistemic)
-        else:
-            mu, log_var = out
-            sigma = torch.exp(0.5 * log_var).cpu().numpy()
-            mu = mu.cpu().numpy()
-            all_aleatoric.extend([np.nan] * len(mu))
-            all_epistemic.extend([np.nan] * len(mu))
-
+        out, attn = model(x)
+        gamma, nu, alpha, beta = out
+        aleatoric = (beta / (alpha - 1)).cpu().numpy()
+        epistemic = (beta / (nu * (alpha - 1))).cpu().numpy()
+        sigma = np.sqrt(aleatoric + epistemic)
+        mu = gamma.cpu().numpy()
+        all_aleatoric.extend(aleatoric)
+        all_epistemic.extend(epistemic)
         all_mu.extend(mu)
         all_sigma.extend(sigma)
         all_y.extend(y.numpy())
+        all_attn.append(attn.cpu().numpy())
 
+    attn_all = np.concatenate(all_attn, axis=0) if all_attn else None
     return (np.array(all_y), np.array(all_mu), np.array(all_sigma),
-            np.array(all_aleatoric), np.array(all_epistemic))
+            np.array(all_aleatoric), np.array(all_epistemic), attn_all)
+
+
+def fit_isotonic_calibrator(y_true, mu, sigma, n_q=20):
+    quantiles = np.linspace(0.05, 0.95, n_q)
+    empirical = []
+    for q in quantiles:
+        z = norm.ppf(q)
+        covered = (y_true <= mu + z * sigma).mean()
+        empirical.append(covered)
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(quantiles, empirical)
+    return iso
+
+
+def calibrated_interval(mu, sigma, iso_calibrator, conf=0.90):
+    target_q_lo, target_q_hi = (1 - conf) / 2, 1 - (1 - conf) / 2
+    grid = np.linspace(0.001, 0.999, 400)
+    mapped = iso_calibrator.predict(grid)
+    q_lo = grid[np.argmin(np.abs(mapped - target_q_lo))]
+    q_hi = grid[np.argmin(np.abs(mapped - target_q_hi))]
+    z_lo, z_hi = norm.ppf(q_lo), norm.ppf(q_hi)
+    return mu + z_lo * sigma, mu + z_hi * sigma
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5.  Main: Load checkpoint and evaluate WITHOUT calibration
+# Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-
     print("=" * 60)
-    print("  CONFIG D: Bidirectional + Evidential (NO CALIBRATION)")
-    print("  Re-evaluating saved model with calibrate=False")
+    print("  GENERATING 4-PANEL FIGURE")
     print("=" * 60)
-    print(f"Device: {DEVICE}")
 
-    # ─── 1. Load checkpoint ───
-    checkpoint_path = r"C:\Users\admin\Desktop\DR2\16 Contributions\Contr03\MIT_Stanford_TRI_SOH_Estimation\checkpoints\bem_soh_best.pt"
-    checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
-
-    # Get configuration from checkpoint
+    # Load checkpoint
+    print("\nLoading checkpoint...")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
     cfg = checkpoint["cfg"]
-    cfg["calibrate"] = False  # ← FORCE CALIBRATION OFF (Config D)
+    cfg["window_size"] = WINDOW_SIZE
 
-    # ─── 2. Load data ───
-    print("\nLoading SOH data...")
-    soh_df, scaler = load_soh_data(cfg["soh_path"])
-    print(f"  SOH: {soh_df.shape}")
-    print(f"  Cells: {soh_df['barcode'].nunique()}")
+    # Load data
+    print("Loading data...")
+    soh_df, scaler = load_soh_data(SOH_DATA_PATH)
 
-    W = cfg["window_size"]
-    train_ds = SequenceDataset(soh_df, W, cfg["soh_stride"], "train")
-    val_ds = SequenceDataset(soh_df, W, cfg["soh_stride"], "val")
-    test_ds = SequenceDataset(soh_df, W, cfg["soh_stride"], "test")
+    val_ds = SequenceDataset(soh_df, WINDOW_SIZE, cfg["soh_stride"], "val")
+    test_ds = SequenceDataset(soh_df, WINDOW_SIZE, cfg["soh_stride"], "test")
 
     val_loader = DataLoader(val_ds, batch_size=cfg["soh_batch"], shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=cfg["soh_batch"], shuffle=False)
 
-    print(f"  Train sequences: {len(train_ds):,}")
-    print(f"  Val sequences:   {len(val_ds):,}")
-    print(f"  Test sequences:  {len(test_ds):,}")
-
-    # ─── 3. Load model ───
-    print("\nBuilding BEM-SOH model...")
+    # Build model
+    print("Building model...")
     model = BEM_SOH(cfg).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"  Parameters: {total_params:,}")
-    print(f"  Config: bidirectional={cfg['bidirectional']}, "
-          f"evidential={cfg['evidential']}, calibrate={cfg['calibrate']}")
-
-    # ─── 4. Evaluate WITHOUT calibration ───
-    print("\n" + "=" * 60)
-    print("  SOH EVALUATION - TEST SET (Config D: No Calibration)")
-    print("=" * 60)
-
     # Get predictions
-    y_val, mu_val, sigma_val, _, _ = get_predictions(model, val_loader, cfg)
-    y_true, y_pred, sigma_test, aleatoric, epistemic = get_predictions(model, test_loader, cfg)
+    print("Getting predictions...")
+    y_val, mu_val, sigma_val, _, _, _ = get_predictions(model, val_loader)
+    y_true, y_pred, sigma_test, aleatoric, epistemic, attn = get_predictions(model, test_loader)
 
-    # Accuracy metrics
+    # Calibration
+    iso = fit_isotonic_calibrator(y_val, mu_val, sigma_val)
+    y_lo_cal, y_hi_cal = calibrated_interval(y_pred, sigma_test, iso, conf=0.90)
+
+    # Get cell_ids and cycles for trajectory
+    cell_ids = test_ds.cell_ids
+    end_cycles = test_ds.end_cycles
+    cell_array = np.array(cell_ids)
+    cycle_array = np.array(end_cycles)
+
     mae = mean_absolute_error(y_true, y_pred) * 100
-    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2)) * 100
     r2 = r2_score(y_true, y_pred)
-    mape = mean_absolute_percentage_error(np.clip(y_true, 1e-6, None), y_pred) * 100
+    print(f"  MAE: {mae:.4f}%, R²: {r2:.5f}")
 
-    # Raw intervals (no calibration)
-    z = 1.645  # nominal 90% Gaussian z
-    y_lo_raw = y_pred - z * sigma_test
-    y_hi_raw = y_pred + z * sigma_test
-    picp_raw = np.mean((y_true >= y_lo_raw) & (y_true <= y_hi_raw))
-    pinw_raw = np.mean(y_hi_raw - y_lo_raw) / (y_true.max() - y_true.min() + 1e-8)
+    # ═════════════════════════════════════════════════════════════════════
+    # Build 2×2 figure
+    # ═════════════════════════════════════════════════════════════════════
 
-    print(f"\n  MAE  : {mae:.4f}%")
-    print(f"  RMSE : {rmse:.4f}%")
-    print(f"  MAPE : {mape:.4f}%")
-    print(f"  R2   : {r2:.5f}")
+    print("\nBuilding 2×2 figure...")
 
-    print(f"\n  -- UNCALIBRATED intervals (nominal 90% Gaussian) --")
-    print(f"  PICP : {picp_raw:.4f}  (target ~0.90)")
-    print(f"  PINW : {pinw_raw:.4f}")
+    fig = plt.figure(figsize=(10, 8))
+    gs = GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.30)
 
-    if cfg["evidential"]:
-        print(f"\n  -- Uncertainty decomposition (mean over test set) --")
-        print(f"  Mean aleatoric var  : {np.nanmean(aleatoric):.6f}")
-        print(f"  Mean epistemic var  : {np.nanmean(epistemic):.6f}")
-        ratio = np.nanmean(aleatoric) / (np.nanmean(epistemic) + 1e-8)
-        print(f"  Aleatoric/Epistemic ratio: {ratio:.2f}")
+    # ─── (a) Predicted vs. True ───
+    ax_a = fig.add_subplot(gs[0, 0])
+    ax_a.scatter(y_true, y_pred, alpha=0.25, s=4, c='#2874A6', edgecolors='none')
+    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+    ax_a.plot(lims, lims, 'r--', linewidth=1.5, label='Perfect prediction')
+    ax_a.set_xlabel('True SOH')
+    ax_a.set_ylabel('Predicted SOH')
+    ax_a.set_title(f'(a) Predicted vs. True SOH\nMAE = {mae:.4f}%  |  R² = {r2:.5f}')
+    ax_a.legend(loc='upper left')
+    ax_a.set_aspect('equal')
+    ax_a.grid(True, alpha=0.3)
 
-    print(f"\n  -- MAE by SOH region --")
-    for label, mask in [
-        ("SOH < 0.90", y_true < 0.90),
-        ("0.90-0.95", (y_true >= 0.90) & (y_true < 0.95)),
-        ("SOH > 0.95", y_true >= 0.95)
-    ]:
-        if mask.sum() > 0:
-            rm = mean_absolute_error(y_true[mask], y_pred[mask]) * 100
-            print(f"  {label}: MAE = {rm:.4f}%  (n={mask.sum()})")
+    # ─── (b) Trajectory for one representative cell ───
+    # Choose cell with most windows
+    unique_cells, counts = np.unique(cell_array, return_counts=True)
+    best_cell = unique_cells[np.argmax(counts)]
 
-    # ─── 5. Summary ───
+    mask = cell_array == best_cell
+    cycles_cell = cycle_array[mask]
+    y_true_cell = y_true[mask]
+    y_pred_cell = y_pred[mask]
+    y_lo_cell = y_lo_cal[mask]
+    y_hi_cell = y_hi_cal[mask]
+
+    sort_idx = np.argsort(cycles_cell)
+    cycles_cell = cycles_cell[sort_idx]
+    y_true_cell = y_true_cell[sort_idx]
+    y_pred_cell = y_pred_cell[sort_idx]
+    y_lo_cell = y_lo_cell[sort_idx]
+    y_hi_cell = y_hi_cell[sort_idx]
+
+    ax_b = fig.add_subplot(gs[0, 1])
+    ax_b.plot(cycles_cell, y_true_cell, 'k-', linewidth=1.8, label='Ground truth')
+    ax_b.plot(cycles_cell, y_pred_cell, 'b-', linewidth=1.5, label='Predicted')
+    ax_b.fill_between(cycles_cell, y_lo_cell, y_hi_cell,
+                       alpha=0.25, color='blue', label='90% calibrated interval')
+    ax_b.axhline(y=0.80, color='red', linestyle='--', linewidth=1, label='EOL (80%)')
+    ax_b.set_xlabel('Cycle index')
+    ax_b.set_ylabel('SOH')
+    ax_b.set_title(f'(b) SOH Trajectory — Cell {best_cell}')
+    ax_b.legend(loc='lower left')
+    ax_b.grid(True, alpha=0.3)
+
+    # ─── (c) Calibration curve ───
+    quantiles = np.linspace(0.05, 0.95, 19)
+
+    raw_coverage = []
+    for q in quantiles:
+        z = norm.ppf(q)
+        covered = (y_true <= y_pred + z * sigma_test).mean()
+        raw_coverage.append(covered)
+
+    cal_coverage = []
+    for q in quantiles:
+        y_lo_c, y_hi_c = calibrated_interval(y_pred, sigma_test, iso, conf=q)
+        covered = (y_true >= y_lo_c) & (y_true <= y_hi_c)
+        cal_coverage.append(covered.mean())
+
+    ax_c = fig.add_subplot(gs[1, 0])
+    ax_c.plot(quantiles, quantiles, 'k--', linewidth=1.5, label='Perfect calibration')
+    ax_c.plot(quantiles, raw_coverage, 'o-', color='#E74C3C', linewidth=1.5,
+              markersize=4, label='Raw (uncalibrated)')
+    ax_c.plot(quantiles, cal_coverage, 's-', color='#27AE60', linewidth=1.5,
+              markersize=4, label='Calibrated')
+    ax_c.set_xlabel('Nominal coverage')
+    ax_c.set_ylabel('Empirical coverage')
+    ax_c.set_title('(c) Calibration Curve')
+    ax_c.legend(loc='upper left')
+    ax_c.set_aspect('equal')
+    ax_c.grid(True, alpha=0.3)
+
+    # ─── (d) Attention weights ───
+    sorted_idx = np.argsort(y_true)
+    low_idx = sorted_idx[0]
+    high_idx = sorted_idx[-1]
+
+    attn_low = attn[low_idx].squeeze()
+    attn_high = attn[high_idx].squeeze()
+
+    ax_d = fig.add_subplot(gs[1, 1])
+    x_axis = np.arange(len(attn_low))
+    ax_d.plot(x_axis, attn_high, '-o', color='#27AE60', linewidth=1.5,
+              markersize=3, label=f'High SOH = {y_true[high_idx]:.3f}')
+    ax_d.plot(x_axis, attn_low, '-s', color='#E74C3C', linewidth=1.5,
+              markersize=3, label=f'Low SOH = {y_true[low_idx]:.3f}')
+    ax_d.set_xlabel('Cycle position in window')
+    ax_d.set_ylabel('Attention weight')
+    ax_d.set_title('(d) Attention Weights — Low vs. High SOH')
+    ax_d.legend(loc='upper left')
+    ax_d.grid(True, alpha=0.3)
+
+    # ─── Save ───
+    plt.savefig(OUT_PATH, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"\n  Saved -> {OUT_PATH}")
     print("\n" + "=" * 60)
-    print("  CONFIG D RESULTS (Bidirectional + Evidential, NO CALIBRATION)")
+    print("  DONE")
     print("=" * 60)
-    print(f"  MAE  : {mae:.4f}%")
-    print(f"  RMSE : {rmse:.4f}%")
-    print(f"  R2   : {r2:.5f}")
-    print(f"  PICP : {picp_raw:.4f}")
-    print(f"  PINW : {pinw_raw:.4f}")
-    print(f"  Aleatoric : {np.nanmean(aleatoric):.6f}")
-    print(f"  Epistemic : {np.nanmean(epistemic):.6f}")
-    print("=" * 60)
-
-    # ─── 6. Save results ───
-    results = {
-        "mae": mae,
-        "rmse": rmse,
-        "mape": mape,
-        "r2": r2,
-        "picp_raw": picp_raw,
-        "pinw_raw": pinw_raw,
-        "mean_aleatoric": float(np.nanmean(aleatoric)),
-        "mean_epistemic": float(np.nanmean(epistemic)),
-        "total_params": total_params,
-    }
-
-    print("\nResults saved in 'results' variable.")
-    print(json.dumps(results, indent=2, default=str))
